@@ -1,5 +1,6 @@
 import sys
 import serial
+import time
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit, QHBoxLayout
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 from matplotlib.figure import Figure
@@ -10,7 +11,7 @@ SERIAL_PORT = 'COM9'  # Replace with actual serial port
 BAUD_RATE = 115200  # Replace with actual baud rate
 SLIDER_RANGE = (0, 100)
 INITIAL_SLIDER_VALUE = 50
-PID_SLIDER_RANGE = (0, 100)
+PID_SLIDER_RANGE = (0, 1000)  # 设置 PID 参数滑块范围
 PID_INITIAL_VALUE = 10
 
 class SerialThread(QThread):
@@ -21,7 +22,11 @@ class SerialThread(QThread):
         super().__init__()
         self.running = True
         self.ser = None
+        self.current_time = 0 #record this time
+        self.last_send_time = 0  # update last time
+        self.send_interval = 0.005  # Time window limit in seconds
         self.initialize_serial()
+
 
     def initialize_serial(self):
         """Initialize the serial port."""
@@ -42,8 +47,11 @@ class SerialThread(QThread):
             except serial.SerialException as e:
                 print(f"Serial communication error: {e}")
                 self.initialize_serial()  # Try to reinitialize serial port
+                self.ser.flushInput()  # 仅清空接收缓存区
             except ValueError:
                 print("Invalid data received")
+                self.ser.flushInput()  # 仅清空接收缓存区
+                time.sleep(0.1) #等待反馈数据
                 continue
 
     def stop(self):
@@ -52,14 +60,17 @@ class SerialThread(QThread):
         if self.ser and self.ser.is_open:
             self.ser.close()
 
-    def send_setpoint(self, setpoint,kp,ki,kd):
-        """Send the target setpoint value via serial communication."""
-        if self.ser and self.ser.is_open:
-            try:
-                message = f'{setpoint:.2f}\t{kp:.2f}\t{ki:.2f}\t{kd:.2f}\t'
-                self.ser.write(message.encode('utf-8'))
-            except serial.SerialException as e:
-                print(f"Failed to send setpoint: {e}")
+    def send_setpoint(self, setpoint, kp, ki, kd):
+        self.current_time = time.time()
+        if self.current_time - self.last_send_time  >= self.send_interval:
+            if self.ser and self.ser.is_open:
+                try:
+                    message = f'\\{setpoint:.2f}\t{kp:.2f}\t{ki:.2f}\t{kd:.2f}\n'
+                    self.ser.write(message.encode('utf-8'))
+                    self.last_send_time = self.current_time
+                    self.ser.flushOutput()  # 仅清空发送缓存区
+                except serial.SerialException as e:
+                    print(f"Failed to send setpoint: {e}")
 
 class PIDControllerApp(QWidget):
     """Main application window for PID controller tuning."""
@@ -84,7 +95,7 @@ class PIDControllerApp(QWidget):
     def initUI(self):
         """Initialize the user interface."""
         self.setWindowTitle('PID Controller Tuning')
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(200, 200, 1000, 700)
 
         layout = QVBoxLayout()
 

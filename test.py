@@ -1,10 +1,9 @@
 import sys
-import serial
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-import numpy as np
+
 
 class PID:
     def __init__(self, kp=1.0, ki=0.1, kd=0.01):
@@ -30,9 +29,6 @@ class PIDControllerApp(QWidget):
         self.time_data = []
         self.measurements = []
         self.initial_measurement = 0
-
-        # Initialize Serial
-        self.serial_port = serial.Serial('COM9', 115200, timeout=1)
 
         self.initUI()
         self.timer = QTimer()
@@ -86,48 +82,37 @@ class PIDControllerApp(QWidget):
     @pyqtSlot(int)
     def update_kp(self, value):
         self.pid.kp = value / 10.0
-        self.send_parameters()
 
     @pyqtSlot(int)
     def update_ki(self, value):
         self.pid.ki = value / 10.0
-        self.send_parameters()
 
     @pyqtSlot(int)
     def update_kd(self, value):
         self.pid.kd = value / 10.0
-        self.send_parameters()
 
     @pyqtSlot(str)
     def update_setpoint(self, text):
         try:
             setpoint = float(text)
             self.pid.setpoint = setpoint
-            self.send_parameters()
         except ValueError:
             pass
 
-    def send_parameters(self):
-        parameters = f"{self.pid.setpoint},{self.pid.kp},{self.pid.ki},{self.pid.kd}\n"
-        self.serial_port.write(parameters.encode())
-
     def simulate(self):
         dt = 0.1
-        measurement = self.initial_measurement
-
-        output = self.pid.compute(measurement, dt)
-        new_measurement = measurement + output * dt
+        output = self.pid.compute(self.initial_measurement, dt)
+        self.initial_measurement += output * dt  # Simulate measurement update
         self.current_time += dt
 
         self.time_data.append(self.current_time)
-        self.measurements.append(new_measurement)
+        self.measurements.append(self.initial_measurement)
 
         if len(self.time_data) > 500:
             self.time_data = self.time_data[-500:]
             self.measurements = self.measurements[-500:]
 
         self.update_plot()
-        self.receive_feedback()
 
     def update_plot(self):
         self.ax.clear()
@@ -138,14 +123,6 @@ class PIDControllerApp(QWidget):
         self.ax.set_ylabel('Value')
         self.ax.legend()
         self.canvas.draw()
-
-    def receive_feedback(self):
-        if self.serial_port.in_waiting:
-            feedback = self.serial_port.readline().decode().strip()
-            try:
-                self.initial_measurement = float(feedback)
-            except ValueError:
-                pass
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
