@@ -28,7 +28,8 @@ Remote_Adjust_PID with sparklink,uart and python realize
 ## 版本描述
 - **版本 1.0.0** - 2024.9.21
   - 初版，基本实现pid调节功能；test用于测试滑块调节功能
-
+- **版本 1.1.0** - 2024.9.23
+  - python的图线绘制速度效果一般，尝试用matlab appdesigner重写
 
 ## 贡献
 欢迎贡献！
