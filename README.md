@@ -28,8 +28,8 @@ Remote_Adjust_PID with sparklink,uart and python realize
 ## 版本描述
 - **版本 1.0.0** - 2024.9.21
   - 初版，基本实现pid调节功能；test用于测试滑块调节功能
-
-
+- **版本 1.1.0** - 2024.11.11
+  - 完善了pid调参，能实现在指定协议情况下的上位机功能
 ## 贡献
 欢迎贡献！
 

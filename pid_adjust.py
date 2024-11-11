@@ -1,103 +1,139 @@
+import struct
 import sys
 import serial
+import serial.tools.list_ports
 import time
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit, QHBoxLayout
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit, QHBoxLayout, QPushButton, QComboBox
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import pyqtgraph as pg
+
+# Enable OpenGL for hardware acceleration
+pg.setConfigOption('useOpenGL', True)
 
 # Constants for serial communication and UI
-SERIAL_PORT = 'COM9'  # Replace with actual serial port
-BAUD_RATE = 115200  # Replace with actual baud rate
+BAUD_RATES = [9600, 115200, 230400, 460800]  # Example baud rates
 SLIDER_RANGE = (0, 100)
 INITIAL_SLIDER_VALUE = 50
-PID_SLIDER_RANGE = (0, 1000)  # 设置 PID 参数滑块范围
+PID_SLIDER_RANGE = (0, 1000)
 PID_INITIAL_VALUE = 10
 
 class SerialThread(QThread):
-    """Handles serial communication in a separate thread."""
-    feedback_signal = pyqtSignal(float)
+    feedback_signal = pyqtSignal(float, float)  # 用于发送目标 RPM 和实际 RPM
 
-    def __init__(self):
+    def __init__(self, port, baud_rate):
         super().__init__()
         self.running = True
         self.ser = None
-        self.current_time = 0 #record this time
-        self.last_send_time = 0  # update last time
-        self.send_interval = 0.005  # Time window limit in seconds
-        self.initialize_serial()
+        self.buffer = b''  # 缓存数据
+        self.last_send_time = 0  # 初始化上次发送时间
+        self.send_interval = 0.05  # 设置发送间隔为1秒
+        self.initialize_serial(port, baud_rate)
 
-
-    def initialize_serial(self):
-        """Initialize the serial port."""
+    def initialize_serial(self, port, baud_rate):
         try:
-            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5)
+            self.ser = serial.Serial(port, baud_rate, timeout=5)
         except serial.SerialException as e:
             print(f"Serial port initialization error: {e}")
 
     def run(self):
-        """Continuously read data from the serial port and emit feedback_signal."""
         while self.running:
             try:
                 if self.ser and self.ser.in_waiting > 0:
-                    data = self.ser.readline()
-                    if data:
-                        feedback = float(data.decode('utf-8').strip())
-                        self.feedback_signal.emit(feedback)
+                    # 读取所有可用的字节
+                    data = self.ser.read(self.ser.in_waiting)
+                    self.buffer += data  # 将新接收到的数据添加到缓存中
+                    print(f"Buffered data: {self.buffer}")
+
+                    # 每次检查缓存数据的最后部分是否包含 \r\n
+                    while b'\r\n' in self.buffer:
+                        # 查找帧尾的位置
+                        end_pos = self.buffer.find(b'\r\n')
+                        frame = self.buffer[:end_pos]  # 提取到帧尾之前的数据作为完整帧
+                        self.buffer = self.buffer[end_pos + 2:]  # 清理缓存中已处理的部分
+                        self.process_frame(frame)  # 处理数据帧
+
             except serial.SerialException as e:
                 print(f"Serial communication error: {e}")
-                self.initialize_serial()  # Try to reinitialize serial port
-                self.ser.flushInput()  # 仅清空接收缓存区
+                self.initialize_serial(port, baud_rate)
+                self.ser.flushInput()
             except ValueError:
                 print("Invalid data received")
-                self.ser.flushInput()  # 仅清空接收缓存区
-                time.sleep(0.1) #等待反馈数据
+                self.ser.flushInput()
+                time.sleep(0.1)
                 continue
 
     def stop(self):
-        """Stop the thread and close the serial port."""
         self.running = False
         if self.ser and self.ser.is_open:
             self.ser.close()
 
+    def process_frame(self, frame):
+        """解析数据帧并发出反馈信号"""
+        try:
+            # 假设数据帧是两个浮点数，格式类似 '32.4,43.5'
+            data_parts = frame.decode('utf-8').split(',')
+            if len(data_parts) == 2:
+                target_rpm = float(data_parts[0])
+                rpm = float(data_parts[1])
+                print(f"Processed data: target_rpm={target_rpm}, rpm={rpm}")
+                # 发出反馈信号，将数据传递给主界面
+                self.feedback_signal.emit(target_rpm, rpm)
+            else:
+                print("Invalid frame data")
+        except Exception as e:
+            print(f"Error processing frame: {e}")
+
     def send_setpoint(self, setpoint, kp, ki, kd):
         self.current_time = time.time()
-        if self.current_time - self.last_send_time  >= self.send_interval:
+        if self.current_time - self.last_send_time >= self.send_interval:
             if self.ser and self.ser.is_open:
                 try:
                     message = f'\\{setpoint:.2f}\t{kp:.2f}\t{ki:.2f}\t{kd:.2f}\n'
                     self.ser.write(message.encode('utf-8'))
-                    self.last_send_time = self.current_time
-                    self.ser.flushOutput()  # 仅清空发送缓存区
+                    self.last_send_time = self.current_time  # 更新上次发送时间
+                    self.ser.flushOutput()
                 except serial.SerialException as e:
                     print(f"Failed to send setpoint: {e}")
 
+
 class PIDControllerApp(QWidget):
-    """Main application window for PID controller tuning."""
     def __init__(self):
         super().__init__()
         self.initUI()
-
-        # Start the serial thread for communication
-        self.serial_thread = SerialThread()
-        self.serial_thread.feedback_signal.connect(self.update_feedback)
-        self.serial_thread.start()
-
-        # Initialize data storage
+        self.serial_thread = None
         self.feedback_data = []
+        self.target_data = []  # 添加此行初始化 target_data
         self.time_data = []
-        self.last_time = 0
         self.target = 0
         self.kp = 0
         self.ki = 0
         self.kd = 0
 
     def initUI(self):
-        """Initialize the user interface."""
         self.setWindowTitle('PID Controller Tuning')
         self.setGeometry(200, 200, 1000, 700)
 
         layout = QVBoxLayout()
+
+        # Serial Port Selection
+        self.port_label = QLabel('Select Serial Port:')
+        layout.addWidget(self.port_label)
+        self.port_combo = QComboBox()
+        self.refresh_ports()  # Initialize available ports
+        layout.addWidget(self.port_combo)
+
+        # Baud Rate Selection
+        self.baud_label = QLabel('Select Baud Rate:')
+        layout.addWidget(self.baud_label)
+        self.baud_combo = QComboBox()
+        self.baud_combo.addItems(map(str, BAUD_RATES))
+        layout.addWidget(self.baud_combo)
+
+        # Open/Close Serial Button
+        self.open_button = QPushButton('Open Serial')
+        self.open_button.setStyleSheet("background-color: green; color: white;")
+        self.open_button.clicked.connect(self.toggle_serial)
+        layout.addWidget(self.open_button)
 
         # Target Value Slider
         self.target_label = QLabel('Target Value:')
@@ -116,110 +152,116 @@ class PIDControllerApp(QWidget):
         self.feedback_label = QLabel('Feedback Data:')
         layout.addWidget(self.feedback_label)
 
-        # Create matplotlib figure and canvas
-        self.figure = Figure()
-        self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas)
-
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_title('Feedback Data Over Time')
-        self.ax.set_xlabel('Time')
-        self.ax.set_ylabel('Feedback')
+        # Create pyqtgraph plot
+        self.plot_widget = pg.PlotWidget(title='Feedback Data Over Time')
+        self.plot_widget.setLabel('left', 'Feedback')
+        self.plot_widget.setLabel('bottom', 'Time')
+        self.plot_widget.setBackground('w')  # Set background to white
+        layout.addWidget(self.plot_widget)
 
         self.setLayout(layout)
 
-    def create_pid_controls(self, name1, update_function, layout):
-        """Helper method to create and add PID sliders and input boxes."""
+    def refresh_ports(self):
+        """Refresh available serial ports."""
+        available_ports = [port.device for port in serial.tools.list_ports.comports()]
+        self.port_combo.clear()
+        self.port_combo.addItems(available_ports)
+
+    def create_pid_controls(self, name, update_function, layout):
         pid_layout = QHBoxLayout()
 
-        # Slider
-        slider_label = QLabel(f'{name1}:')
+        slider_label = QLabel(f'{name}:')
         pid_layout.addWidget(slider_label)
         slider = QSlider(Qt.Horizontal)
         slider.setRange(*PID_SLIDER_RANGE)
         slider.setValue(PID_INITIAL_VALUE)
-        slider.valueChanged.connect(lambda value, name=name1: self.slider_changed(value, name, update_function))
+        slider.valueChanged.connect(
+            lambda value, func=update_function, name=name: self.slider_changed(value, func, name))
         pid_layout.addWidget(slider)
 
-        # Input Box
         input_box = QLineEdit()
         input_box.setText(f'{PID_INITIAL_VALUE / 10.0:.2f}')
         input_box.setMaxLength(5)
-        input_box.textChanged.connect(lambda text, name=name1: self.input_changed(text, name, slider, update_function))
+        input_box.textChanged.connect(lambda text, func=update_function, s=slider: self.input_changed(text, func, s))
         pid_layout.addWidget(input_box)
 
         layout.addLayout(pid_layout)
 
-        # Store references to sliders and input boxes for updates
-        setattr(self, f'{name1.lower()}_slider', slider)
-        setattr(self, f'{name1.lower()}_input', input_box)
+        setattr(self, f'{name.lower()}_slider', slider)
+        setattr(self, f'{name.lower()}_input', input_box)
 
-    def slider_changed(self, value, name, update_function):
-        """Update input box and send value when slider changes."""
-        value = value / 10.0
+    def slider_changed(self, value, update_function, name):
+        value /= 10.0
         input_box = getattr(self, f'{name.lower()}_input')
         input_box.setText(f'{value:.2f}')
         update_function(value)
 
-    def input_changed(self, text, name, slider, update_function):
-        """Update slider and send value when input box changes."""
+    def input_changed(self, text, update_function, slider):
         try:
             value = float(text)
             slider.setValue(int(value * 10))
             update_function(value)
         except ValueError:
-            pass  # Ignore invalid inputs
+            pass
+
+    def toggle_serial(self):
+        if self.serial_thread is None or not self.serial_thread.isRunning():
+            port = self.port_combo.currentText()
+            baud_rate = int(self.baud_combo.currentText())
+            self.serial_thread = SerialThread(port, baud_rate)
+            self.serial_thread.feedback_signal.connect(self.update_feedback)
+            self.serial_thread.start()
+            self.open_button.setText('Close Serial')
+            self.open_button.setStyleSheet("background-color: red; color: white;")
+        else:
+            self.serial_thread.stop()
+            self.serial_thread.wait()
+            self.serial_thread = None
+            self.open_button.setText('Open Serial')
+            self.open_button.setStyleSheet("background-color: green; color: white;")
 
     def update_target(self, value):
-        """Update target value based on slider input and send it via serial."""
         self.target = value
-        self.serial_thread.send_setpoint(self.target,self.kp,self.ki,self.kd)
+        if self.serial_thread and self.serial_thread.isRunning():
+            self.serial_thread.send_setpoint(self.target, self.kp, self.ki, self.kd)
 
     def update_kp(self, value):
-        """Update Kp parameter based on slider input and print the new value."""
         self.kp = value
-        print(f'Updated Kp: {self.kp:.2f}')
-        self.serial_thread.send_setpoint(self.target,self.kp,self.ki,self.kd)
+        if self.serial_thread and self.serial_thread.isRunning():
+            self.serial_thread.send_setpoint(self.target, self.kp, self.ki, self.kd)
 
     def update_ki(self, value):
-        """Update Ki parameter based on slider input and print the new value."""
         self.ki = value
-        print(f'Updated Ki: {self.ki:.2f}')
-        self.serial_thread.send_setpoint(self.target,self.kp,self.ki,self.kd)
+        if self.serial_thread and self.serial_thread.isRunning():
+            self.serial_thread.send_setpoint(self.target, self.kp, self.ki, self.kd)
 
     def update_kd(self, value):
-        """Update Kd parameter based on slider input and print the new value."""
         self.kd = value
-        print(f'Updated Kd: {self.kd:.2f}')
-        self.serial_thread.send_setpoint(self.target,self.kp,self.ki,self.kd)
+        if self.serial_thread and self.serial_thread.isRunning():
+            self.serial_thread.send_setpoint(self.target, self.kp, self.ki, self.kd)
 
-    def update_feedback(self, feedback):
-        """Update the feedback data and plot it."""
+    def update_feedback(self, target_rpm, rpm):
         current_time = len(self.feedback_data)
 
-        # Append feedback data
-        self.feedback_data.append(feedback)
+        # Append data for both rpm and target_rpm
+        self.feedback_data.append(rpm)
+        self.target_data.append(target_rpm)
         self.time_data.append(current_time)
 
-        # Clear and update the plot
-        self.ax.clear()
-        self.ax.plot(self.time_data, self.feedback_data, label='Feedback')
-        self.ax.set_title('Feedback Data Over Time')
-        self.ax.set_xlabel('Time')
-        self.ax.set_ylabel('Feedback')
-        self.ax.legend()
+        # Update plot
+        self.plot_widget.clear()
+        # 绘制 target_rpm 数据，使用蓝色线条
+        self.plot_widget.plot(self.time_data, self.target_data, pen='b', symbol='o', name="Target RPM")
+        # 绘制 rpm 数据，使用红色线条
+        self.plot_widget.plot(self.time_data, self.feedback_data, pen='r', symbol='x', name="RPM")
 
-        # Auto scale y-axis
-        self.ax.relim()
-        self.ax.autoscale_view()
-
-        # Refresh the canvas
-        self.canvas.draw()
+        # Clear buffer for next frame
+        self.buffer = b''
 
     def closeEvent(self, event):
-        """Handle window close event to stop the serial thread."""
-        self.serial_thread.stop()
-        self.serial_thread.wait()
+        if self.serial_thread:
+            self.serial_thread.stop()
+            self.serial_thread.wait()
         event.accept()
 
 if __name__ == '__main__':

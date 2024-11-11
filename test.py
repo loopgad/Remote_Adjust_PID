@@ -1,128 +1,209 @@
 import sys
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit
-from PyQt5.QtCore import Qt, QTimer, pyqtSlot
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import numpy as np
+import random
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit, QHBoxLayout, QPushButton
+from PyQt5.QtCore import QTimer, Qt
+import pyqtgraph as pg
+import time
 
+# Enable OpenGL for hardware acceleration
+pg.setConfigOption('useOpenGL', True)
 
-class PID:
-    def __init__(self, kp=1.0, ki=0.1, kd=0.01):
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
-        self.setpoint = 0
-        self.last_error = 0
-        self.integral = 0
+# Constants for UI
+SLIDER_RANGE = (0, 100)
+INITIAL_SLIDER_VALUE = 50
+PID_SLIDER_RANGE = (0, 1000)
+PID_INITIAL_VALUE = 10
+UPDATE_INTERVAL = 1  # Update every 1 ms
+SMOOTHING_WINDOW = 5  # Size of the smoothing window
 
-    def compute(self, measurement, dt):
-        error = self.setpoint - measurement
-        self.integral += error * dt
-        derivative = (error - self.last_error) / dt
-        output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
-        self.last_error = error
-        return output
 
 class PIDControllerApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.pid = PID()
-        self.time_data = []
-        self.measurements = []
-        self.initial_measurement = 0
-
         self.initUI()
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.simulate)
-        self.timer.start(100)
-        self.current_time = 0
+        self.feedback_data = []
+        self.target_data = []
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_pid)
+        self.running = False
+
+        # Initialize PID parameters
+        self.kp = PID_INITIAL_VALUE / 10.0
+        self.ki = PID_INITIAL_VALUE / 10.0
+        self.kd = PID_INITIAL_VALUE / 10.0
+        self.previous_error = 0
+        self.integral = 0
+        self.target = 0
+
+        # For frame rate calculation
+        self.frame_count = 0
+        self.start_time = time.time()
 
     def initUI(self):
         self.setWindowTitle('PID Controller Tuning')
-        self.setGeometry(100, 100, 800, 600)
+        self.setGeometry(200, 200, 1000, 700)
+
         layout = QVBoxLayout()
 
-        # PID Parameters Sliders
-        self.kp_slider = QSlider(Qt.Horizontal, self)
-        self.kp_slider.setRange(0, 100)
-        self.kp_slider.setValue(int(self.pid.kp * 10))
-        self.kp_slider.valueChanged.connect(self.update_kp)
-        layout.addWidget(QLabel('Kp:'))
-        layout.addWidget(self.kp_slider)
+        # Target Value Slider
+        self.target_label = QLabel('Target Value:')
+        layout.addWidget(self.target_label)
+        self.target_slider = QSlider(Qt.Horizontal)
+        self.target_slider.setRange(*SLIDER_RANGE)
+        self.target_slider.setValue(INITIAL_SLIDER_VALUE)
+        self.target_slider.valueChanged.connect(self.update_target)
+        layout.addWidget(self.target_slider)
 
-        self.ki_slider = QSlider(Qt.Horizontal, self)
-        self.ki_slider.setRange(0, 100)
-        self.ki_slider.setValue(int(self.pid.ki * 10))
-        self.ki_slider.valueChanged.connect(self.update_ki)
-        layout.addWidget(QLabel('Ki:'))
-        layout.addWidget(self.ki_slider)
+        # PID Parameters Sliders and Inputs
+        self.create_pid_controls('Kp', self.update_kp, layout)
+        self.create_pid_controls('Ki', self.update_ki, layout)
+        self.create_pid_controls('Kd', self.update_kd, layout)
 
-        self.kd_slider = QSlider(Qt.Horizontal, self)
-        self.kd_slider.setRange(0, 100)
-        self.kd_slider.setValue(int(self.pid.kd * 10))
-        self.kd_slider.valueChanged.connect(self.update_kd)
-        layout.addWidget(QLabel('Kd:'))
-        layout.addWidget(self.kd_slider)
+        # Frame Rate Label
+        self.fps_label = QLabel('FPS: 0')
+        layout.addWidget(self.fps_label)
 
-        self.setpoint_input = QLineEdit(self)
-        self.setpoint_input.setText(str(self.pid.setpoint))
-        self.setpoint_input.textChanged.connect(self.update_setpoint)
-        layout.addWidget(QLabel('Setpoint:'))
-        layout.addWidget(self.setpoint_input)
+        # Start/Stop Button
+        self.start_button = QPushButton('Start')
+        self.start_button.clicked.connect(self.toggle_timer)
+        layout.addWidget(self.start_button)
 
-        self.figure = Figure()
-        self.canvas = FigureCanvas(self.figure)
-        layout.addWidget(self.canvas)
+        # Create pyqtgraph plot
+        self.plot_widget = pg.PlotWidget(title='Feedback and Target Data Over Time')
+        self.plot_widget.setLabel('left', 'Value')
+        self.plot_widget.setLabel('bottom', 'Time (s)')
+        self.plot_widget.setBackground('w')  # Set background to white
+        layout.addWidget(self.plot_widget)
 
-        self.ax = self.figure.add_subplot(111)
-        self.ax.set_title('Setpoint and Feedback Over Time')
-        self.ax.set_xlabel('Time')
-        self.ax.set_ylabel('Value')
         self.setLayout(layout)
 
-    @pyqtSlot(int)
-    def update_kp(self, value):
-        self.pid.kp = value / 10.0
+    def create_pid_controls(self, name, update_function, layout):
+        pid_layout = QHBoxLayout()
 
-    @pyqtSlot(int)
-    def update_ki(self, value):
-        self.pid.ki = value / 10.0
+        slider_label = QLabel(f'{name}:')
+        pid_layout.addWidget(slider_label)
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(*PID_SLIDER_RANGE)
+        slider.setValue(PID_INITIAL_VALUE)
+        slider.valueChanged.connect(lambda value, func=update_function: self.slider_changed(value, func, name))
+        pid_layout.addWidget(slider)
 
-    @pyqtSlot(int)
-    def update_kd(self, value):
-        self.pid.kd = value / 10.0
+        input_box = QLineEdit()
+        input_box.setText(f'{PID_INITIAL_VALUE / 10.0:.2f}')
+        input_box.setMaxLength(5)
+        input_box.textChanged.connect(lambda text, func=update_function, s=slider: self.input_changed(text, func, s))
+        pid_layout.addWidget(input_box)
 
-    @pyqtSlot(str)
-    def update_setpoint(self, text):
+        layout.addLayout(pid_layout)
+
+        setattr(self, f'{name.lower()}_slider', slider)
+        setattr(self, f'{name.lower()}_input', input_box)
+
+    def slider_changed(self, value, update_function, name):
+        value /= 10.0
+        input_box = getattr(self, f'{name.lower()}_input')
+        input_box.setText(f'{value:.2f}')
+        update_function(value)
+
+    def input_changed(self, text, update_function, slider):
         try:
-            setpoint = float(text)
-            self.pid.setpoint = setpoint
+            value = float(text)
+            slider.setValue(int(value * 10))
+            update_function(value)
         except ValueError:
             pass
 
-    def simulate(self):
-        dt = 0.1
-        output = self.pid.compute(self.initial_measurement, dt)
-        self.initial_measurement += output * dt  # Simulate measurement update
-        self.current_time += dt
+    def toggle_timer(self):
+        if not self.running:
+            self.running = True
+            self.timer.start(UPDATE_INTERVAL)  # Start the timer
+            self.start_button.setText('Stop')
+        else:
+            self.running = False
+            self.timer.stop()  # Stop the timer
+            self.start_button.setText('Start')
 
-        self.time_data.append(self.current_time)
-        self.measurements.append(self.initial_measurement)
+    def update_pid(self):
+        # Generate random target value between 1 and 6000
+        random_target = random.randint(1, 6000)
+        self.target_data.append(random_target)
 
-        if len(self.time_data) > 500:
-            self.time_data = self.time_data[-500:]
-            self.measurements = self.measurements[-500:]
+        # Calculate PID feedback data
+        if not self.feedback_data:  # First call, initialize feedback
+            current_feedback = 0
+        else:
+            current_feedback = self.simulate_pid(random_target)
+        self.feedback_data.append(current_feedback)
 
+        # Update frame rate
+        self.frame_count += 1
+        if time.time() - self.start_time >= 1.0:  # Every second
+            self.fps_label.setText(f'FPS: {self.frame_count}')
+            self.frame_count = 0
+            self.start_time = time.time()
+
+        # Update plot
         self.update_plot()
 
+    def simulate_pid(self, target):
+        # Simple PID simulation
+        if not self.feedback_data:  # First call
+            return 0  # Assume initial feedback is 0
+
+        error = target - self.feedback_data[-1]
+        self.integral += error * (UPDATE_INTERVAL / 1000)  # Time in seconds
+        derivative = error - self.previous_error
+
+        # PID output
+        output = self.feedback_data[-1] + (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
+
+        # Update for next iteration
+        self.previous_error = error
+
+        return output
+
+    def smooth_data(self, data):
+        if len(data) < SMOOTHING_WINDOW:
+            return data  # 不足平滑窗口大小时直接返回原始数据
+        return np.convolve(data, np.ones(SMOOTHING_WINDOW) / SMOOTHING_WINDOW, mode='valid')
+
     def update_plot(self):
-        self.ax.clear()
-        self.ax.plot(self.time_data, self.measurements, label='Feedback', color='blue')
-        self.ax.axhline(y=self.pid.setpoint, color='red', linestyle='--', label='Setpoint')
-        self.ax.set_title('Setpoint and Feedback Over Time')
-        self.ax.set_xlabel('Time')
-        self.ax.set_ylabel('Value')
-        self.ax.legend()
-        self.canvas.draw()
+        time_data = np.linspace(0, len(self.feedback_data) * (UPDATE_INTERVAL / 1000),
+                                num=len(self.feedback_data))  # Update time scale
+
+        # Smooth the feedback and target data
+        smooth_feedback_data = self.smooth_data(np.array(self.feedback_data))
+        smooth_target_data = self.smooth_data(np.array(self.target_data))
+
+        # Clear the plot
+        self.plot_widget.clear()
+
+        # Plot feedback and target data
+        self.plot_widget.plot(time_data[:len(smooth_feedback_data)], smooth_feedback_data, pen='r', symbol='o',
+                              label='PID Output (Smooth)')
+        self.plot_widget.plot(time_data[:len(smooth_target_data)], smooth_target_data, pen='b', symbol='x',
+                              label='Target Value (Smooth)')
+
+        self.plot_widget.addLegend()  # Show legend for clarity
+
+    def update_target(self, value):
+        self.target = value / 1.0  # 保持为浮点数，确保目标值更新
+
+    def update_kp(self, value):
+        self.kp = value / 10.0
+
+    def update_ki(self, value):
+        self.ki = value / 10.0
+
+    def update_kd(self, value):
+        self.kd = value / 10.0
+
+    def closeEvent(self, event):
+        self.running = False
+        self.timer.stop()  # Stop the timer
+        event.accept()
+
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
