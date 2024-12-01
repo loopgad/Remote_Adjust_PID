@@ -30,10 +30,16 @@ Remote_Adjust_PID with sparklink,uart and python realize
   - 初版，基本实现pid调节功能；test用于测试滑块调节功能
 - **版本 1.1.0** - 2024.11.11
   - 完善了pid调参，能实现在指定协议情况下的上位机功能
-## 贡献
+
+
+# One order bandpass filter
+
+## 内容
+**使用python编写的滤波图像可视化脚本（使用matplotlib）**
+
+
+# 贡献
 欢迎贡献！
 
-## 许可证
-该项目采用 [MIT 许可证](LICENSE)。
-
-
+# 许可证
+该项目采用 [GNU 许可证](LICENSE)。

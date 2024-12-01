@@ -33,10 +33,10 @@ class First_Order_BPF:
 
 # 生成测试信号
 t = np.linspace(0, 1, 1000, endpoint=False)  # 1 second
-signal = np.sin(2 * np.pi * 24544540 * t) + 0.5 * np.sin(np.pi * 2 * t )  # 10 Hz and 20 Hz
+signal = np.sin(2 * np.pi * 205 * t) + 0.5 * np.sin(np.pi * 2 * t )  # 10 Hz and 20 Hz
 
 # 应用滤波器
-bpf = First_Order_BPF(16000, 2, 1000)  # 中心频率15Hz，带宽5Hz，采样频率1000Hz
+bpf = First_Order_BPF(160, 5, 1000)  # 中心频率160Hz，带宽5Hz，采样频率1000Hz
 filtered_signal = np.array([bpf.filter(val) for val in signal])
 
 # 可视化结果
