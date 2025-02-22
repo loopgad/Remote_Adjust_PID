@@ -1,0 +1,12 @@
+debug/draw_buck.o
+debug/draw_pid.o
+debug/main.o
+debug/maindrawdynamic.o
+debug/mainwindow.o
+debug/qcustomplot.o
+debug/qrc_resource.o
+debug/moc_draw_buck.o
+debug/moc_draw_pid.o
+debug/moc_maindrawdynamic.o
+debug/moc_mainwindow.o
+debug/moc_qcustomplot.o

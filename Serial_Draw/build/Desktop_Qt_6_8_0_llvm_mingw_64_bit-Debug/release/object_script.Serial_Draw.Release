@@ -1,0 +1,12 @@
+release/draw_buck.o
+release/draw_pid.o
+release/main.o
+release/maindrawdynamic.o
+release/mainwindow.o
+release/qcustomplot.o
+release/qrc_resource.o
+release/moc_draw_buck.o
+release/moc_draw_pid.o
+release/moc_maindrawdynamic.o
+release/moc_mainwindow.o
+release/moc_qcustomplot.o
