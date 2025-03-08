@@ -1,212 +1,109 @@
-import sys
 import numpy as np
-import random
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QLabel, QSlider, QLineEdit, QHBoxLayout, QPushButton
-from PyQt5.QtCore import QTimer, Qt
-import pyqtgraph as pg
-import time
+import matplotlib.pyplot as plt
 
-# Enable OpenGL for hardware acceleration
-pg.setConfigOption('useOpenGL', True)
+# 两轮差速小车的运动学参数
+wheel_radius = 0.1  # 轮子半径
+wheel_base = 0.5  # 轮子间距
+time_step = 0.1  # 时间步长
+target_pos = np.array([5.0, 5.0])  # 目标位置
+dead_zone = 0.1  # 死区半径
 
-# Constants for UI
-SLIDER_RANGE = (0, 100)
-INITIAL_SLIDER_VALUE = 50
-PID_SLIDER_RANGE = (0, 1000)
-PID_INITIAL_VALUE = 10
-UPDATE_INTERVAL = 1  # Update every 1 ms
-SMOOTHING_WINDOW = 5  # Size of the smoothing window
+# 初始状态
+state_pid = np.array([0.0, 0.0, 0.0])  # [x, y, theta]，theta为朝向角度
+state_ndi = np.array([0.0, 0.0, 0.0])  # [x, y, theta]，theta为朝向角度
 
+# PID控制器参数
+kp = 1.5
+ki = 0.01
+kd = 0.05
+pid_error_integral = np.array([0.0, 0.0])
+pid_previous_error = np.array([0.0, 0.0])
 
-class PIDControllerApp(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.initUI()
-        self.feedback_data = []
-        self.target_data = []
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_pid)
-        self.running = False
+# NDI控制器参数
+ndi_kp = 1.5
+ndi_kd = 0.3
 
-        # Initialize PID parameters
-        self.kp = PID_INITIAL_VALUE / 10.0
-        self.ki = PID_INITIAL_VALUE / 10.0
-        self.kd = PID_INITIAL_VALUE / 10.0
-        self.previous_error = 0
-        self.integral = 0
-        self.target = 0
-
-        # For frame rate calculation
-        self.frame_count = 0
-        self.start_time = time.time()
-
-    def initUI(self):
-        self.setWindowTitle('PID Controller Tuning')
-        self.setGeometry(200, 200, 1000, 700)
-
-        layout = QVBoxLayout()
-
-        # Target Value Slider
-        self.target_label = QLabel('Target Value:')
-        layout.addWidget(self.target_label)
-        self.target_slider = QSlider(Qt.Horizontal)
-        self.target_slider.setRange(*SLIDER_RANGE)
-        self.target_slider.setValue(INITIAL_SLIDER_VALUE)
-        self.target_slider.valueChanged.connect(self.update_target)
-        layout.addWidget(self.target_slider)
-
-        # PID Parameters Sliders and Inputs
-        self.create_pid_controls('Kp', self.update_kp, layout)
-        self.create_pid_controls('Ki', self.update_ki, layout)
-        self.create_pid_controls('Kd', self.update_kd, layout)
-
-        # Frame Rate Label
-        self.fps_label = QLabel('FPS: 0')
-        layout.addWidget(self.fps_label)
-
-        # Start/Stop Button
-        self.start_button = QPushButton('Start')
-        self.start_button.clicked.connect(self.toggle_timer)
-        layout.addWidget(self.start_button)
-
-        # Create pyqtgraph plot
-        self.plot_widget = pg.PlotWidget(title='Feedback and Target Data Over Time')
-        self.plot_widget.setLabel('left', 'Value')
-        self.plot_widget.setLabel('bottom', 'Time (s)')
-        self.plot_widget.setBackground('w')  # Set background to white
-        layout.addWidget(self.plot_widget)
-
-        self.setLayout(layout)
-
-    def create_pid_controls(self, name, update_function, layout):
-        pid_layout = QHBoxLayout()
-
-        slider_label = QLabel(f'{name}:')
-        pid_layout.addWidget(slider_label)
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(*PID_SLIDER_RANGE)
-        slider.setValue(PID_INITIAL_VALUE)
-        slider.valueChanged.connect(lambda value, func=update_function: self.slider_changed(value, func, name))
-        pid_layout.addWidget(slider)
-
-        input_box = QLineEdit()
-        input_box.setText(f'{PID_INITIAL_VALUE / 10.0:.2f}')
-        input_box.setMaxLength(5)
-        input_box.textChanged.connect(lambda text, func=update_function, s=slider: self.input_changed(text, func, s))
-        pid_layout.addWidget(input_box)
-
-        layout.addLayout(pid_layout)
-
-        setattr(self, f'{name.lower()}_slider', slider)
-        setattr(self, f'{name.lower()}_input', input_box)
-
-    def slider_changed(self, value, update_function, name):
-        value /= 10.0
-        input_box = getattr(self, f'{name.lower()}_input')
-        input_box.setText(f'{value:.2f}')
-        update_function(value)
-
-    def input_changed(self, text, update_function, slider):
-        try:
-            value = float(text)
-            slider.setValue(int(value * 10))
-            update_function(value)
-        except ValueError:
-            pass
-
-    def toggle_timer(self):
-        if not self.running:
-            self.running = True
-            self.timer.start(UPDATE_INTERVAL)  # Start the timer
-            self.start_button.setText('Stop')
-        else:
-            self.running = False
-            self.timer.stop()  # Stop the timer
-            self.start_button.setText('Start')
-
-    def update_pid(self):
-        # Generate random target value between 1 and 6000
-        random_target = random.randint(1, 6000)
-        self.target_data.append(random_target)
-
-        # Calculate PID feedback data
-        if not self.feedback_data:  # First call, initialize feedback
-            current_feedback = 0
-        else:
-            current_feedback = self.simulate_pid(random_target)
-        self.feedback_data.append(current_feedback)
-
-        # Update frame rate
-        self.frame_count += 1
-        if time.time() - self.start_time >= 1.0:  # Every second
-            self.fps_label.setText(f'FPS: {self.frame_count}')
-            self.frame_count = 0
-            self.start_time = time.time()
-
-        # Update plot
-        self.update_plot()
-
-    def simulate_pid(self, target):
-        # Simple PID simulation
-        if not self.feedback_data:  # First call
-            return 0  # Assume initial feedback is 0
-
-        error = target - self.feedback_data[-1]
-        self.integral += error * (UPDATE_INTERVAL / 1000)  # Time in seconds
-        derivative = error - self.previous_error
-
-        # PID output
-        output = self.feedback_data[-1] + (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
-
-        # Update for next iteration
-        self.previous_error = error
-
-        return output
-
-    def smooth_data(self, data):
-        if len(data) < SMOOTHING_WINDOW:
-            return data  # 不足平滑窗口大小时直接返回原始数据
-        return np.convolve(data, np.ones(SMOOTHING_WINDOW) / SMOOTHING_WINDOW, mode='valid')
-
-    def update_plot(self):
-        time_data = np.linspace(0, len(self.feedback_data) * (UPDATE_INTERVAL / 1000),
-                                num=len(self.feedback_data))  # Update time scale
-
-        # Smooth the feedback and target data
-        smooth_feedback_data = self.smooth_data(np.array(self.feedback_data))
-        smooth_target_data = self.smooth_data(np.array(self.target_data))
-
-        # Clear the plot
-        self.plot_widget.clear()
-
-        # Plot feedback and target data
-        self.plot_widget.plot(time_data[:len(smooth_feedback_data)], smooth_feedback_data, pen='r', symbol='o',
-                              label='PID Output (Smooth)')
-        self.plot_widget.plot(time_data[:len(smooth_target_data)], smooth_target_data, pen='b', symbol='x',
-                              label='Target Value (Smooth)')
-
-        self.plot_widget.addLegend()  # Show legend for clarity
-
-    def update_target(self, value):
-        self.target = value / 1.0  # 保持为浮点数，确保目标值更新
-
-    def update_kp(self, value):
-        self.kp = value / 10.0
-
-    def update_ki(self, value):
-        self.ki = value / 10.0
-
-    def update_kd(self, value):
-        self.kd = value / 10.0
-
-    def closeEvent(self, event):
-        self.running = False
-        self.timer.stop()  # Stop the timer
-        event.accept()
+# 初始化路径数据
+pid_path_x = [state_pid[0]]
+pid_path_y = [state_pid[1]]
+ndi_path_x = [state_ndi[0]]
+ndi_path_y = [state_ndi[1]]
 
 
-if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    ex = PIDControllerApp()
-    ex.show()
-    sys.exit(app.exec_())
+# PWM到速度的映射函数
+def pwm_to_velocity(pwm):
+    # 假设PWM信号范围为0到255，速度范围为-1到1
+    return (pwm - 127.5) / 127.5
+
+
+# PID控制器
+def pid_control(state, target_pos, pid_error_integral, pid_previous_error, kp, ki, kd):
+    error = target_pos - state[:2]
+    pid_error_integral += error * time_step
+    error_derivative = (error - pid_previous_error) / time_step
+    u_pid_pwm = kp * error + ki * pid_error_integral + kd * error_derivative
+    pid_previous_error = error
+    return u_pid_pwm, pid_error_integral, pid_previous_error
+
+
+# NDI控制器
+def ndi_control(state, target_pos, ndi_kp, ndi_kd):
+    error = target_pos - state[:2]
+    error_derivative = -ndi_kd * state[2]
+    u_ndi_pwm = ndi_kp * error + error_derivative
+    return u_ndi_pwm
+
+
+# 两轮差速小车的运动学模型更新
+def update_state(state, u, time_step):
+    # 将PWM信号转换为速度
+    v_left = pwm_to_velocity(u[0])
+    v_right = pwm_to_velocity(u[1])
+
+    # 计算线速度和角速度
+    if v_right == v_left:
+        wz = 0
+        vx = v_right
+    else:
+        wz = (v_right - v_left) / wheel_base * wheel_radius
+        R = wheel_base * (v_right + v_left) / 2 / (v_right - v_left)
+        vx = wz * R
+
+    # 更新状态
+    state[0] += vx * np.cos(state[2]) * time_step
+    state[1] += vx * np.sin(state[2]) * time_step
+    state[2] += wz * time_step
+    return state
+
+
+# 动态更新
+while True:
+    # 更新PID状态
+    u_pid_pwm, pid_error_integral, pid_previous_error = pid_control(state_pid, target_pos, pid_error_integral,
+                                                                    pid_previous_error, kp, ki, kd)
+    state_pid = update_state(state_pid, u_pid_pwm, time_step)
+    pid_path_x.append(state_pid[0])
+    pid_path_y.append(state_pid[1])
+
+    # 更新NDI状态
+    u_ndi_pwm = ndi_control(state_ndi, target_pos, ndi_kp, ndi_kd)
+    state_ndi = update_state(state_ndi, u_ndi_pwm, time_step)
+    ndi_path_x.append(state_ndi[0])
+    ndi_path_y.append(state_ndi[1])
+
+    # 检查是否到达目标位置
+    if np.linalg.norm(state_pid[:2] - target_pos) < dead_zone or np.linalg.norm(state_ndi[:2] - target_pos) < dead_zone:
+        print('Reached the target position.')
+        break
+
+# 可视化
+plt.figure()
+plt.plot(pid_path_x, pid_path_y, 'b', linewidth=2, label='PID Path')
+plt.plot(ndi_path_x, ndi_path_y, 'g', linewidth=2, label='NDI Path')
+plt.scatter(target_pos[0], target_pos[1], color='r', label='Target Position')
+plt.legend()
+plt.axis('equal')
+plt.xlim([-10, 10])
+plt.ylim([-10, 10])
+plt.grid(True)
+plt.show()
