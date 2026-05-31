@@ -167,6 +167,7 @@ NB_MODULE(_core, m) {
 
     nb::class_<solvers::RK4Solver>(solver_mod, "RK4Solver")
         .def(nb::init<>())
+        .def(nb::init<double>(), nb::arg("dt"))
         .def("solve", &solvers::RK4Solver::solve)
         .def("step", &solvers::RK4Solver::step);
 

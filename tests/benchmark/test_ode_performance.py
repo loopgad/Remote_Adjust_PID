@@ -19,7 +19,7 @@ from typing import Dict, List
 
 import pytest
 
-from param_id_gui._core import RK4Solver
+from param_id_gui._core.solvers import RK4Solver
 
 
 # ── Pure-Python RK4 Implementation ───────────────────────────
@@ -97,17 +97,17 @@ def benchmark_cpp_rk4(
     Returns:
         Dictionary with benchmark results
     """
-    solver = RK4Solver()
+    solver = RK4Solver(dt)
 
     # Warmup runs
     for _ in range(n_warmup):
-        solver.solve(f, t0, t1, y0, dt)
+        solver.solve(f, t0, t1, y0)
 
     # Benchmark runs
     times = []
     for _ in range(n_runs):
         start = time.perf_counter()
-        solver.solve(f, t0, t1, y0, dt)
+        solver.solve(f, t0, t1, y0)
         end = time.perf_counter()
         times.append(end - start)
 
@@ -288,9 +288,9 @@ class TestODEPerformance:
         def f(t, y):
             return [-y[0]]
 
-        solver = RK4Solver()
-        result = solver.solve(f, 0.0, 1.0, [1.0], 0.001)
-        final = result[-1][0]
+        solver = RK4Solver(0.001)
+        result = solver.solve(f, 0.0, 1.0, [1.0])
+        final = result.y[-1][0]
         expected = math.exp(-1.0)
 
         error = abs(final - expected)
