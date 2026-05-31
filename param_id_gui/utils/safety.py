@@ -223,10 +223,14 @@ class NumericalSafety:
         try:
             result = operation(*args)
             
-            # Check for NaN/Inf
+            # Check for NaN/Inf in arrays
             if isinstance(result, np.ndarray):
                 if np.any(np.isnan(result)) or np.any(np.isinf(result)):
                     return default if default is not None else np.zeros_like(result)
+            # Check for NaN/Inf in scalars
+            elif isinstance(result, (int, float, np.integer, np.floating)):
+                if np.isnan(result) or np.isinf(result):
+                    return default if default is not None else np.array([0.0])
             
             return result
             
