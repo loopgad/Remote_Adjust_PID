@@ -8,6 +8,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 
+from param_id_gui.gui.panels import (
+    ModelConfigPanel,
+    SimulationPanel,
+    ParamIDPanel,
+    ResultsPanel,
+)
+
 
 class MainWindow(QMainWindow):
     """Main window for the parameter identification application.
@@ -136,19 +143,19 @@ class MainWindow(QMainWindow):
     def _setup_panels(self):
         """Setup the tabbed panels."""
         # Model Configuration Panel
-        self._model_config_panel = QWidget()
+        self._model_config_panel = ModelConfigPanel()
         self._tab_widget.addTab(self._model_config_panel, "Model Configuration")
         
         # Simulation Panel
-        self._simulation_panel = QWidget()
+        self._simulation_panel = SimulationPanel()
         self._tab_widget.addTab(self._simulation_panel, "Simulation")
         
         # Parameter Identification Panel
-        self._param_id_panel = QWidget()
+        self._param_id_panel = ParamIDPanel()
         self._tab_widget.addTab(self._param_id_panel, "Parameter Identification")
         
         # Results Panel
-        self._results_panel = QWidget()
+        self._results_panel = ResultsPanel()
         self._tab_widget.addTab(self._results_panel, "Results")
     
     def _update_status(self):
