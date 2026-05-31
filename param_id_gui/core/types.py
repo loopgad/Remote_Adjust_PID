@@ -1,6 +1,7 @@
 """Core data structures and type definitions for param_id_gui.
 
 Uses Pydantic for data validation and type safety.
+Updated for testing git hooks.
 """
 
 from enum import Enum

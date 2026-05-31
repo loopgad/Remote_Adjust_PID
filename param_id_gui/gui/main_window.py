@@ -1,6 +1,7 @@
 """PySide6 main window for the parameter identification application."""
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QMenuBar, QStatusBar, QLabel, QToolBar
@@ -14,6 +15,9 @@ from param_id_gui.gui.panels import (
     ParamIDPanel,
     ResultsPanel,
 )
+
+if TYPE_CHECKING:
+    from param_id_gui.core.simulation_controller import SimulationController
 
 
 class MainWindow(QMainWindow):
@@ -30,6 +34,8 @@ class MainWindow(QMainWindow):
             parent: Parent widget
         """
         super().__init__(parent)
+        
+        self._controller: Optional['SimulationController'] = None
         
         # Set window properties
         self.setWindowTitle("High-Precision Parameter Identification")
@@ -54,6 +60,57 @@ class MainWindow(QMainWindow):
         self._status_timer = QTimer()
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start(1000)  # Update every second
+    
+    def set_controller(self, controller: 'SimulationController') -> None:
+        """Set the simulation controller.
+        
+        Args:
+            controller: SimulationController instance
+        """
+        self._controller = controller
+        
+        # Inject controller into simulation panel
+        self._simulation_panel.set_controller(controller)
+        
+        # Connect menu/toolbar actions
+        self._connect_actions()
+        
+        # Connect params_changed signal from model config panel
+        self._model_config_panel.params_changed.connect(self._on_params_changed)
+    
+    def _on_params_changed(self, model_name: str, params: dict) -> None:
+        """Handle params changed from ModelConfigPanel."""
+        if self._controller:
+            self._controller._current_model_name = model_name
+            self._controller._current_params = params
+    
+    def _connect_actions(self) -> None:
+        """Connect menu and toolbar actions to controller."""
+        if not self._controller:
+            return
+        
+        # Find and connect Simulation menu actions
+        menubar = self.menuBar()
+        for menu in menubar.findChildren(type(menubar.addMenu("dummy"))):
+            if menu.title() == "Simulation":
+                for action in menu.actions():
+                    if action.text() == "Start":
+                        action.triggered.connect(self._controller.start_simulation)
+                    elif action.text() == "Pause":
+                        action.triggered.connect(self._controller.pause_simulation)
+                    elif action.text() == "Stop":
+                        action.triggered.connect(self._controller.stop_simulation)
+        
+        # Connect toolbar actions
+        toolbar = self.findChild(QToolBar)
+        if toolbar:
+            for action in toolbar.actions():
+                if action.text() == "Start":
+                    action.triggered.connect(self._controller.start_simulation)
+                elif action.text() == "Pause":
+                    action.triggered.connect(self._controller.pause_simulation)
+                elif action.text() == "Stop":
+                    action.triggered.connect(self._controller.stop_simulation)
     
     def _setup_menu_bar(self):
         """Setup the menu bar."""
@@ -160,8 +217,30 @@ class MainWindow(QMainWindow):
     
     def _update_status(self):
         """Update status bar information."""
-        # This will be connected to the orchestrator later
-        pass
+        if not self._controller:
+            return
+        
+        # Get latest data from controller
+        data = self._controller.get_latest_data()
+        
+        # Update time display
+        time = data.get("time", 0.0)
+        self._time_label.setText(f"Time: {time:.3f} s")
+        
+        # Update status display
+        state = data.get("state", "idle")
+        if state == "running":
+            self._status_label.setText("Simulation Running")
+            self._status_label.setStyleSheet("color: green;")
+        elif state == "paused":
+            self._status_label.setText("Simulation Paused")
+            self._status_label.setStyleSheet("color: orange;")
+        elif state == "error":
+            self._status_label.setText("Simulation Error")
+            self._status_label.setStyleSheet("color: red;")
+        else:
+            self._status_label.setText("Ready")
+            self._status_label.setStyleSheet("")
     
     def add_panel(self, name: str, widget: QWidget):
         """Add a new panel to the tab widget.

@@ -1,0 +1,374 @@
+# Git Hooks 关联文件检测配置
+# 用于 pre-commit hook 检测更改是否需要同步更新关联文件
+# 
+# 规则类型:
+#   - warn: 警告，允许提交但显示提示
+#   - block: 阻塞，阻止提交直到关联文件被更新
+#
+# 变量说明:
+#   $MODULE: 匹配的模块路径 (如 param_id_gui/core)
+#   $FILE: 匹配的文件名 (如 types.py)
+#   $BASENAME: 不带扩展名的文件名 (如 types)
+
+# ============================================================================
+# 全局配置
+# ============================================================================
+config:
+  # 是否启用 hook (可通过环境变量 GIT_HOOKS_ENABLED 覆盖)
+  enabled: true
+  # 默认严重级别 (warn/block)
+  default_severity: warn
+  # 是否显示通过的检查
+  show_passed: false
+  # 排除的文件模式 (glob)
+  exclude_patterns:
+    - "*.md"
+    - ".gitignore"
+    - ".idea/*"
+    - ".venv/*"
+    - "build/*"
+    - ".pytest_cache/*"
+    - "__pycache__/*"
+    - "*.pyc"
+
+# ============================================================================
+# 模块关联规则
+# ============================================================================
+rules:
+  # --------------------------------------------------------------------------
+  # 核心类型定义 (core/types.py)
+  # --------------------------------------------------------------------------
+  - name: "类型定义同步"
+    description: "修改 core/types.py 时，需要同步更新引用该类型的模块"
+    match: "param_id_gui/core/types.py"
+    related:
+      - "param_id_gui/models/motor/pmsm_dq.py"      # PMSMParams
+      - "param_id_gui/models/power/power_models.py"   # BuckConverterParams, BoostConverterParams
+      - "param_id_gui/models/controller/foc.py"       # FOCParams
+      - "param_id_gui/gui/panels/model_config.py"     # 所有 Params 类型
+      - "param_id_gui/gui/panels/param_id.py"         # AlgorithmType, LMConfig, PSOConfig
+    severity: warn
+    message: "类型定义已更改，请检查以下文件是否需要同步更新:"
+
+  # --------------------------------------------------------------------------
+  # 仿真编排器 (core/orchestrator.py)
+  # --------------------------------------------------------------------------
+  - name: "编排器状态同步"
+    description: "修改 orchestrator.py 的 SimulationState 时，需要同步 types.py"
+    match: "param_id_gui/core/orchestrator.py"
+    related:
+      - "param_id_gui/core/types.py"                  # SimulationState 重复定义
+      - "param_id_gui/gui/panels/simulation.py"       # 使用 SimulationState
+    severity: warn
+    message: "编排器已更改，请检查 SimulationState 定义是否一致:"
+
+  # --------------------------------------------------------------------------
+  # 模型注册中心 (core/model_registry.py)
+  # --------------------------------------------------------------------------
+  - name: "注册中心同步"
+    description: "修改 model_registry.py 的 FidelityLevel/Domain 时，需要同步 types.py"
+    match: "param_id_gui/core/model_registry.py"
+    related:
+      - "param_id_gui/core/types.py"                  # FidelityLevel 重复定义
+      - "param_id_gui/gui/panels/model_config.py"     # 使用 FidelityLevel
+    severity: warn
+    message: "模型注册中心已更改，请检查 FidelityLevel/Domain 定义是否一致:"
+
+  # --------------------------------------------------------------------------
+  # 数据总线 (core/data_bus.py)
+  # --------------------------------------------------------------------------
+  - name: "数据总线同步"
+    description: "修改 data_bus.py 的 Signal/DataValidity 时，需要检查依赖模块"
+    match: "param_id_gui/core/data_bus.py"
+    related:
+      - "param_id_gui/core/orchestrator.py"           # 使用 DataBus
+      - "param_id_gui/gui/panels/simulation.py"       # 使用 DataBus
+    severity: warn
+    message: "数据总线已更改，请检查依赖模块是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # PMSM 模型 (models/motor/pmsm_dq.py)
+  # --------------------------------------------------------------------------
+  - name: "PMSM模型同步"
+    description: "修改 PMSM 模型时，需要同步 legacy wrapper 和 GUI 面板"
+    match: "param_id_gui/models/motor/pmsm_dq.py"
+    related:
+      - "param_id_gui/models/__init__.py"             # 导出 PMSMModel
+      - "param_id_gui/gui/panels/model_config.py"     # PMSM 配置面板
+      - "param_id_gui/gui/panels/simulation.py"       # PMSM 仿真
+    severity: warn
+    message: "PMSM 模型已更改，请检查 legacy wrapper 和 GUI 面板:"
+
+  # --------------------------------------------------------------------------
+  # 电源模型 (models/power/power_models.py)
+  # --------------------------------------------------------------------------
+  - name: "电源模型同步"
+    description: "修改电源模型时，需要同步 GUI 面板"
+    match: "param_id_gui/models/power/power_models.py"
+    related:
+      - "param_id_gui/models/__init__.py"             # 导出 BuckConverter, BoostConverter
+      - "param_id_gui/gui/panels/model_config.py"     # 电源配置面板
+    severity: warn
+    message: "电源模型已更改，请检查 GUI 面板是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # FOC 控制器 (models/controller/foc.py)
+  # --------------------------------------------------------------------------
+  - name: "FOC控制器同步"
+    description: "修改 FOC 控制器时，需要同步 legacy wrapper 和 GUI 面板"
+    match: "param_id_gui/models/controller/foc.py"
+    related:
+      - "param_id_gui/models/__init__.py"             # 导出 FOCController
+      - "param_id_gui/gui/panels/model_config.py"     # FOC 配置面板
+    severity: warn
+    message: "FOC 控制器已更改，请检查 legacy wrapper 和 GUI 面板:"
+
+  # --------------------------------------------------------------------------
+  # LM 算法 (algorithms/lm.py)
+  # --------------------------------------------------------------------------
+  - name: "LM算法同步"
+    description: "修改 LM 算法时，需要同步算法面板"
+    match: "param_id_gui/algorithms/lm.py"
+    related:
+      - "param_id_gui/algorithms/__init__.py"         # 导出 LevenbergMarquardt
+      - "param_id_gui/gui/panels/param_id.py"         # 算法面板
+    severity: warn
+    message: "LM 算法已更改，请检查算法面板是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # PSO 算法 (algorithms/pso.py)
+  # --------------------------------------------------------------------------
+  - name: "PSO算法同步"
+    description: "修改 PSO 算法时，需要同步算法面板"
+    match: "param_id_gui/algorithms/pso.py"
+    related:
+      - "param_id_gui/algorithms/__init__.py"         # 导出 ParticleSwarmOptimization
+      - "param_id_gui/gui/panels/param_id.py"         # 算法面板
+    severity: warn
+    message: "PSO 算法已更改，请检查算法面板是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # GUI 主窗口 (gui/main_window.py)
+  # --------------------------------------------------------------------------
+  - name: "主窗口同步"
+    description: "修改主窗口时，需要检查所有面板"
+    match: "param_id_gui/gui/main_window.py"
+    related:
+      - "param_id_gui/gui/panels/__init__.py"         # 面板导出
+      - "param_id_gui/gui/panels/model_config.py"     # 模型配置面板
+      - "param_id_gui/gui/panels/simulation.py"       # 仿真面板
+      - "param_id_gui/gui/panels/param_id.py"         # 参数识别面板
+      - "param_id_gui/gui/panels/results.py"          # 结果面板
+    severity: warn
+    message: "主窗口已更改，请检查所有面板是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # GUI 面板 (gui/panels/*.py)
+  # --------------------------------------------------------------------------
+  - name: "面板模块同步"
+    description: "修改面板时，需要同步主窗口和相关核心模块"
+    match: "param_id_gui/gui/panels/*.py"
+    related:
+      - "param_id_gui/gui/panels/__init__.py"         # 面板导出
+      - "param_id_gui/gui/main_window.py"             # 主窗口
+    severity: warn
+    message: "面板已更改，请检查面板导出和主窗口:"
+
+  # --------------------------------------------------------------------------
+  # HDF5 数据处理 (data/hdf5_handler.py)
+  # --------------------------------------------------------------------------
+  - name: "HDF5处理器同步"
+    description: "修改 HDF5 处理器时，需要同步结果面板"
+    match: "param_id_gui/data/hdf5_handler.py"
+    related:
+      - "param_id_gui/data/__init__.py"               # 导出 HDF5Handler
+      - "param_id_gui/gui/panels/results.py"          # 结果面板
+    severity: warn
+    message: "HDF5 处理器已更改，请检查结果面板是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # C++ 绑定 (cpp/bindings/*.cpp)
+  # --------------------------------------------------------------------------
+  - name: "C++绑定同步"
+    description: "修改 C++ 绑定时，需要同步 CMakeLists.txt"
+    match: "param_id_gui/cpp/bindings/*.cpp"
+    related:
+      - "cmake/CMakeLists.txt"                        # C++ 构建配置
+      - "param_id_gui/cpp/include/*.h"                # 头文件
+    severity: warn
+    message: "C++ 绑定已更改，请检查 CMakeLists.txt 和头文件:"
+
+  # --------------------------------------------------------------------------
+  # C++ 头文件 (cpp/include/*.h)
+  # --------------------------------------------------------------------------
+  - name: "C++头文件同步"
+    description: "修改 C++ 头文件时，需要同步源文件和绑定"
+    match: "param_id_gui/cpp/include/*.h"
+    related:
+      - "param_id_gui/cpp/src/*.cpp"                  # 源文件
+      - "param_id_gui/cpp/bindings/*.cpp"             # 绑定文件
+      - "cmake/CMakeLists.txt"                        # C++ 构建配置
+    severity: warn
+    message: "C++ 头文件已更改，请检查源文件和绑定:"
+
+  # --------------------------------------------------------------------------
+  # C++ 源文件 (cpp/src/*.cpp)
+  # --------------------------------------------------------------------------
+  - name: "C++源文件同步"
+    description: "修改 C++ 源文件时，需要同步 CMakeLists.txt"
+    match: "param_id_gui/cpp/src/*.cpp"
+    related:
+      - "param_id_gui/cpp/include/*.h"                # 头文件
+      - "cmake/CMakeLists.txt"                        # C++ 构建配置
+    severity: warn
+    message: "C++ 源文件已更改，请检查头文件和 CMakeLists.txt:"
+
+  # --------------------------------------------------------------------------
+  # CMakeLists.txt
+  # --------------------------------------------------------------------------
+  - name: "CMake配置同步"
+    description: "修改 CMakeLists.txt 时，需要检查所有 C++ 文件"
+    match: "cmake/CMakeLists.txt"
+    related:
+      - "param_id_gui/cpp/src/*.cpp"                  # 所有源文件
+      - "param_id_gui/cpp/include/*.h"                # 所有头文件
+      - "param_id_gui/cpp/bindings/*.cpp"             # 所有绑定文件
+    severity: warn
+    message: "CMakeLists.txt 已更改，请检查所有 C++ 文件是否需要更新:"
+
+  # --------------------------------------------------------------------------
+  # pyproject.toml
+  # --------------------------------------------------------------------------
+  - name: "项目配置同步"
+    description: "修改 pyproject.toml 时，需要检查版本和依赖"
+    match: "pyproject.toml"
+    related:
+      - "param_id_gui/__init__.py"                    # 版本号
+      - "README.md"                                   # 项目文档
+    severity: warn
+    message: "项目配置已更改，请检查版本号和文档:"
+
+  # --------------------------------------------------------------------------
+  # __init__.py 文件
+  # --------------------------------------------------------------------------
+  - name: "模块导出同步"
+    description: "修改 __init__.py 时，需要检查实际模块"
+    match: "param_id_gui/**/__init__.py"
+    related: []  # 动态生成，见下方 special_rules
+    severity: warn
+    message: "模块导出已更改，请检查导出的类/函数是否仍然存在:"
+
+# ============================================================================
+# 特殊规则 (无法用 glob 表达的复杂规则)
+# ============================================================================
+special_rules:
+  # __init__.py 导出检查
+  - name: "导出存在性检查"
+    description: "检查 __init__.py 导出的类/函数是否在对应模块中存在"
+    match: "param_id_gui/**/__init__.py"
+    check: export_exists
+    severity: block
+    message: "导出的类/函数在模块中不存在，必须修复:"
+
+  # 重复定义检查
+  - name: "重复定义检查"
+    description: "检查同一类/函数是否在多个文件中定义"
+    match:
+      - "param_id_gui/core/types.py"
+      - "param_id_gui/core/orchestrator.py"
+      - "param_id_gui/core/model_registry.py"
+    check: duplicate_definitions
+    severity: warn
+    message: "发现重复定义，请考虑统一到一处:"
+
+  # 测试文件关联
+  - name: "测试文件关联"
+    description: "修改源文件时，提醒更新对应测试"
+    match: "param_id_gui/**/*.py"
+    exclude: "param_id_gui/**/__init__.py"
+    related_pattern: "tests/**/test_$BASENAME.py"
+    severity: warn
+    message: "源文件已更改，请检查是否有对应测试需要更新:"
+
+  # 测试文件反向关联
+  - name: "测试文件反向关联"
+    description: "修改测试文件时，提醒检查源文件"
+    match: "tests/**/*.py"
+    related_pattern: "param_id_gui/**/$BASENAME.py"
+    severity: warn
+    message: "测试文件已更改，请检查源文件是否需要更新:"
+
+# ============================================================================
+# 文档关联规则
+# ============================================================================
+documentation_rules:
+  # README.md 关联
+  - name: "README关联"
+    description: "修改核心模块时，提醒更新 README.md"
+    match:
+      - "param_id_gui/core/*.py"
+      - "param_id_gui/models/*.py"
+      - "param_id_gui/algorithms/*.py"
+    related:
+      - "README.md"
+    severity: warn
+    message: "核心模块已更改，请考虑更新 README.md 文档:"
+
+  # API 文档关联
+  - name: "API文档关联"
+    description: "修改公开 API 时，提醒更新文档"
+    match:
+      - "param_id_gui/core/types.py"
+      - "param_id_gui/core/orchestrator.py"
+      - "param_id_gui/core/data_bus.py"
+      - "param_id_gui/core/model_registry.py"
+    related:
+      - "README.md"
+      - "docs/*.md"
+    severity: warn
+    message: "公开 API 已更改，请考虑更新 API 文档:"
+
+  # 重构计划关联
+  - name: "重构计划关联"
+    description: "修改核心模块时，提醒更新重构计划"
+    match:
+      - "param_id_gui/core/*.py"
+      - "param_id_gui/models/*.py"
+    related:
+      - ".sisyphus/plans/param-id-refactor.md"
+    severity: warn
+    message: "核心模块已更改，请考虑更新重构计划:"
+
+# ============================================================================
+# 已知问题检测
+# ============================================================================
+known_issues:
+  # SimulationState 重复定义
+  - name: "SimulationState重复定义"
+    description: "SimulationState 在 orchestrator.py 和 types.py 中重复定义"
+    files:
+      - "param_id_gui/core/orchestrator.py"
+      - "param_id_gui/core/types.py"
+    pattern: "class SimulationState"
+    severity: warn
+    message: "SimulationState 在多处定义，请考虑统一到 types.py"
+
+  # FidelityLevel 重复定义
+  - name: "FidelityLevel重复定义"
+    description: "FidelityLevel 在 model_registry.py 和 types.py 中重复定义"
+    files:
+      - "param_id_gui/core/model_registry.py"
+      - "param_id_gui/core/types.py"
+    pattern: "class FidelityLevel"
+    severity: warn
+    message: "FidelityLevel 在多处定义，请考虑统一到 types.py"
+
+  # Legacy wrapper 检查
+  - name: "Legacy wrapper检查"
+    description: "修改新接口时，需要同步 legacy wrapper"
+    match:
+      - "param_id_gui/models/motor/pmsm_dq.py"
+      - "param_id_gui/models/controller/foc.py"
+    check: legacy_wrapper_sync
+    severity: warn
+    message: "新接口已更改，请检查 legacy wrapper 是否需要同步:"

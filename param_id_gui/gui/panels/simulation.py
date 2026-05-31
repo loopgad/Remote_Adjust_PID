@@ -4,9 +4,12 @@ Provides interface for simulation control, real-time waveform visualization,
 and simulation status monitoring.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
 import numpy as np
 from collections import deque
+
+if TYPE_CHECKING:
+    from param_id_gui.core.simulation_controller import SimulationController
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -145,6 +148,7 @@ class SimulationPanel(QWidget):
         """Initialize simulation panel."""
         super().__init__(parent)
         
+        self._controller: Optional['SimulationController'] = None
         self._is_running = False
         self._is_paused = False
         self._simulation_time = 0.0
@@ -152,6 +156,76 @@ class SimulationPanel(QWidget):
         self._update_timer.timeout.connect(self._update_display)
         
         self._setup_ui()
+    
+    def set_controller(self, controller: 'SimulationController') -> None:
+        """Set the simulation controller.
+        
+        Args:
+            controller: SimulationController instance
+        """
+        self._controller = controller
+        
+        # Connect controller signals
+        self._controller.state_changed.connect(self._on_state_changed)
+        self._controller.step_completed.connect(self._on_step_completed)
+        self._controller.error_occurred.connect(self._on_error)
+    
+    def _on_state_changed(self, state: str) -> None:
+        """Handle state change from controller."""
+        if state == "running":
+            self._is_running = True
+            self._is_paused = False
+            self._start_btn.setEnabled(False)
+            self._pause_btn.setEnabled(True)
+            self._stop_btn.setEnabled(True)
+            self._status_label.setText("Running")
+            self._status_label.setStyleSheet("color: green;")
+            self._update_timer.start(50)  # 20 FPS
+        elif state == "paused":
+            self._is_paused = True
+            self._pause_btn.setText("Resume")
+            self._status_label.setText("Paused")
+            self._status_label.setStyleSheet("color: orange;")
+            self._update_timer.stop()
+        elif state == "idle":
+            self._is_running = False
+            self._is_paused = False
+            self._start_btn.setEnabled(True)
+            self._pause_btn.setEnabled(False)
+            self._stop_btn.setEnabled(False)
+            self._pause_btn.setText("Pause")
+            self._status_label.setText("Idle")
+            self._status_label.setStyleSheet("color: gray;")
+            self._update_timer.stop()
+        elif state == "stopped":
+            self._is_running = False
+            self._is_paused = False
+            self._start_btn.setEnabled(True)
+            self._pause_btn.setEnabled(False)
+            self._stop_btn.setEnabled(False)
+            self._pause_btn.setText("Pause")
+            self._status_label.setText("Stopped")
+            self._status_label.setStyleSheet("color: gray;")
+            self._update_timer.stop()
+        elif state == "error":
+            self._is_running = False
+            self._is_paused = False
+            self._start_btn.setEnabled(True)
+            self._pause_btn.setEnabled(False)
+            self._stop_btn.setEnabled(False)
+            self._status_label.setText("Error")
+            self._status_label.setStyleSheet("color: red;")
+            self._update_timer.stop()
+    
+    def _on_step_completed(self, state: Dict[str, Any]) -> None:
+        """Handle step completed from controller."""
+        # Update step count
+        if "step_count" in state:
+            self._step_count_label.setText(str(state["step_count"]))
+    
+    def _on_error(self, error_msg: str) -> None:
+        """Handle error from controller."""
+        QMessageBox.critical(self, "Simulation Error", error_msg)
     
     def _setup_ui(self):
         """Setup UI components."""
@@ -294,67 +368,41 @@ class SimulationPanel(QWidget):
     
     def _on_start(self):
         """Handle start button click."""
-        if not self._is_running:
-            self._is_running = True
-            self._is_paused = False
+        if not self._is_running and self._controller:
+            # Get simulation parameters
+            model_name = self._model_combo.currentText()
+            duration = self._duration_spin.value()
+            step_size = self._step_size_spin.value()
             
-            self._start_btn.setEnabled(False)
-            self._pause_btn.setEnabled(True)
-            self._stop_btn.setEnabled(True)
+            # Get model params from controller (set by ModelConfigPanel)
+            params = self._controller.get_current_params() or {}
             
-            self._status_label.setText("Running")
-            self._status_label.setStyleSheet("color: green;")
-            
-            # Start update timer
-            self._update_timer.start(50)  # 20 FPS
-            
-            self.simulation_started.emit()
+            # Start simulation via controller
+            self._controller.start_simulation(model_name, params, duration, step_size)
     
     def _on_pause(self):
         """Handle pause button click."""
-        if self._is_running:
+        if self._is_running and self._controller:
             if self._is_paused:
-                # Resume
-                self._is_paused = False
-                self._pause_btn.setText("Pause")
-                self._status_label.setText("Running")
-                self._status_label.setStyleSheet("color: green;")
-                self._update_timer.start(50)
+                # Resume - restart simulation
+                model_name = self._model_combo.currentText()
+                duration = self._duration_spin.value()
+                step_size = self._step_size_spin.value()
+                params = self._controller.get_current_params() or {}
+                self._controller.start_simulation(model_name, params, duration, step_size)
             else:
                 # Pause
-                self._is_paused = True
-                self._pause_btn.setText("Resume")
-                self._status_label.setText("Paused")
-                self._status_label.setStyleSheet("color: orange;")
-                self._update_timer.stop()
-            
-            self.simulation_paused.emit()
+                self._controller.pause_simulation()
     
     def _on_stop(self):
         """Handle stop button click."""
-        self._is_running = False
-        self._is_paused = False
-        
-        self._start_btn.setEnabled(True)
-        self._pause_btn.setEnabled(False)
-        self._stop_btn.setEnabled(False)
-        self._pause_btn.setText("Pause")
-        
-        self._status_label.setText("Stopped")
-        self._status_label.setStyleSheet("color: gray;")
-        
-        self._update_timer.stop()
-        
-        self.simulation_stopped.emit()
+        if self._controller:
+            self._controller.stop_simulation()
     
     def _on_reset(self):
         """Handle reset button click."""
-        self._on_stop()
-        
-        self._simulation_time = 0.0
-        self._time_label.setText("0.000 s")
-        self._step_count_label.setText("0")
-        self._progress_bar.setValue(0)
+        if self._controller:
+            self._controller.reset_simulation()
         
         # Clear waveforms
         self._current_waveform.clear()
@@ -364,13 +412,39 @@ class SimulationPanel(QWidget):
         # Reset data table
         for i in range(self._data_table.rowCount()):
             self._data_table.item(i, 1).setText("0.0")
-        
-        self.simulation_reset.emit()
     
     def _update_display(self):
         """Update display with current simulation data."""
-        # This will be connected to the orchestrator
-        pass
+        if not self._controller:
+            return
+        
+        # Get latest data from controller
+        data = self._controller.get_latest_data()
+        
+        # Update time display
+        time = data.get("time", 0.0)
+        self._time_label.setText(f"{time:.3f} s")
+        self._simulation_time = time
+        
+        # Update step count
+        step_count = data.get("step_count", 0)
+        self._step_count_label.setText(str(step_count))
+        
+        # Update waveforms if we have model data
+        model_name = self._controller.get_current_model_name() or "PMSM"
+        
+        # Extract model-specific data
+        waveform_data = {}
+        for key in ["ia", "ib", "ic", "va", "vb", "vc", "speed"]:
+            # Try with model prefix first, then without
+            full_key = f"{model_name}/{key}"
+            if full_key in data:
+                waveform_data[key] = data[full_key]
+            elif key in data:
+                waveform_data[key] = data[key]
+        
+        if waveform_data:
+            self.update_waveforms(time, waveform_data)
     
     def update_waveforms(self, time: float, data: Dict[str, float]):
         """Update waveform displays.
