@@ -102,7 +102,7 @@ def test_model_imports():
     assert boost.params.Vin == 5.0
     
     foc = FOCController()
-    assert foc.params.Kp_d == 10.0
+    assert foc.pi_id.kp == 5.0  # Default value from sim_platform
 
 
 def test_algorithm_imports():
