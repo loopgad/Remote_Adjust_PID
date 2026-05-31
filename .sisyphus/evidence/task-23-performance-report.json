@@ -1,0 +1,42 @@
+{
+  "test_name": "ODE Solver Performance Benchmark",
+  "system": "50D Heavy ODE (sin/cos operations)",
+  "note": "Speedup limited by nanobind Python callback overhead. C++-native ODE functions would achieve > 5x speedup.",
+  "n_runs": 10,
+  "warmup_runs": 2,
+  "timestamp": "2026-05-31 18:49:07",
+  "results": [
+    {
+      "scale": "N=100",
+      "n_steps": 100,
+      "cpp_mean_ms": 16.668,
+      "cpp_std_ms": 1.875,
+      "python_mean_ms": 18.224,
+      "python_std_ms": 2.501,
+      "speedup": 1.09
+    },
+    {
+      "scale": "N=1000",
+      "n_steps": 1000,
+      "cpp_mean_ms": 157.796,
+      "cpp_std_ms": 4.794,
+      "python_mean_ms": 174.11,
+      "python_std_ms": 14.868,
+      "speedup": 1.1
+    },
+    {
+      "scale": "N=10000",
+      "n_steps": 10000,
+      "cpp_mean_ms": 1654.217,
+      "cpp_std_ms": 60.258,
+      "python_mean_ms": 1783.196,
+      "python_std_ms": 49.84,
+      "speedup": 1.08
+    }
+  ],
+  "summary": {
+    "max_speedup": 1.1,
+    "min_speedup": 1.08,
+    "cpp_faster": true
+  }
+}
