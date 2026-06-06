@@ -61,6 +61,8 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake
+build/
+cmake-build-*/
 
 # nanobind build
 _build/
