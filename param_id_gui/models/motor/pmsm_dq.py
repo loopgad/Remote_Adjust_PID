@@ -9,17 +9,12 @@ Security:
 """
 
 import math
+from typing import Dict, Optional, Tuple
 import numpy as np
+from param_id_gui.core.numeric_utils import guard_numeric as _guard_numeric, cached_cos_sin as _cached_cos_sin
 
 _MOTOR_EPS_L = 1e-12   # minimum inductance [H]
 _MOTOR_EPS_J = 1e-15   # minimum inertia [kg·m²]
-
-
-def _guard_numeric(value: float, fallback: float = 0.0) -> float:
-    """Guard against NaN/Inf, return fallback."""
-    if math.isnan(value) or math.isinf(value):
-        return fallback
-    return value
 
 
 class PMSMdqModel:
@@ -75,8 +70,8 @@ class PMSMdqModel:
             (self.Ld - self.Lq) * id_s * iq_s
         )
 
-    def step(self, vd: float, vq: float, tl: float = 0.0,
-             dt: float = None) -> None:
+    def step_dq(self, vd: float, vq: float, tl: float = 0.0,
+             dt: Optional[float] = None) -> None:
         """Forward Euler integration with NaN/Inf and zero-divide guards.
 
         Args:
@@ -124,15 +119,31 @@ class PMSMdqModel:
         # Wrap theta_e to [0, 2π)
         self.theta_e = self.theta_e % (2 * math.pi)
 
-    def update_abc_currents(self) -> tuple:
+    def step(self, inputs: dict, dt_ns: int = 50000) -> Dict[str, float]:
+        """Protocol-compliant step method (ModelProtocol).
+
+        Args:
+            inputs: Dictionary with keys 'vd', 'vq', 'tl'.
+            dt_ns: Time step in nanoseconds.
+
+        Returns:
+            Current state dictionary.
+        """
+        vd = inputs.get("vd", 0.0)
+        vq = inputs.get("vq", 0.0)
+        tl = inputs.get("tl", 0.0)
+        dt = dt_ns / 1e9
+        self.step_dq(vd, vq, tl, dt)
+        self.update_abc_currents()
+        return self.get_state()
+
+    def update_abc_currents(self) -> Tuple[float, float, float]:
         """Compute three-phase currents from dq currents.
 
         Returns:
             Tuple of (ia, ib, ic) currents [A]
         """
-        theta = self.theta_e
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
+        cos_t, sin_t = _cached_cos_sin(self.theta_e)
 
         ia_alpha = self.id * cos_t - self.iq * sin_t
         ia_beta = self.id * sin_t + self.iq * cos_t
@@ -158,11 +169,10 @@ class PMSMdqModel:
         vc = _guard_numeric(vc, 0.0)
         v_alpha = va
         v_beta = (va + 2 * vb) / math.sqrt(3)
-        cos_t = math.cos(self.theta_e)
-        sin_t = math.sin(self.theta_e)
+        cos_t, sin_t = _cached_cos_sin(self.theta_e)
         vd = v_alpha * cos_t + v_beta * sin_t
         vq = -v_alpha * sin_t + v_beta * cos_t
-        self.step(vd, vq, tl, dt)
+        self.step_dq(vd, vq, tl, dt)
 
     def reset(self) -> None:
         """Reset model state to initial values."""
@@ -173,7 +183,11 @@ class PMSMdqModel:
         self.torque = 0.0
         self.ia = self.ib = self.ic = 0.0
 
-    def get_state(self) -> dict:
+    def get_default_inputs(self) -> Dict[str, float]:
+        """Get default inputs for PMSM model."""
+        return {"vd": 0.0, "vq": 0.0, "tl": 0.0}
+
+    def get_state(self) -> Dict[str, float]:
         """Get current model state.
 
         Returns:
@@ -185,86 +199,6 @@ class PMSMdqModel:
             "torque": self.torque,
             "ia": self.ia, "ib": self.ib, "ic": self.ic,
             "omega_e": self.omega_e,
+            "speed": self.omega_m,
         }
 
-
-# ── Legacy compatibility ──────────────────────────────────────
-
-# Keep PMSMParameters and PMSMModel for backward compatibility
-from dataclasses import dataclass as _dataclass
-from typing import Dict as _Dict, Any as _Any, Optional as _Optional
-
-
-@_dataclass
-class PMSMParameters:
-    """PMSM model parameters (legacy compatibility)."""
-    Rs: float = 0.5      # Stator resistance (Ohm)
-    Ld: float = 0.005    # d-axis inductance (H)
-    Lq: float = 0.005    # q-axis inductance (H)
-    psi_f: float = 0.1   # Permanent magnet flux linkage (Wb)
-    p: int = 4           # Number of pole pairs
-    J: float = 0.001     # Moment of inertia (kg·m²)
-    B: float = 0.001     # Viscous friction coefficient (N·m·s/rad)
-
-
-class PMSMModel:
-    """PMSM dq-axis model (legacy compatibility wrapper).
-
-    This class wraps PMSMdqModel for backward compatibility with
-    the original interface.
-    """
-
-    def __init__(self, params: _Optional[PMSMParameters] = None):
-        """Initialize PMSM model.
-
-        Args:
-            params: PMSM parameters (uses defaults if None)
-        """
-        p = params or PMSMParameters()
-        self._model = PMSMdqModel(
-            Rs=p.Rs, Ld=p.Ld, Lq=p.Lq,
-            flux_pm=p.psi_f, J=p.J, B=p.B, Pp=p.p
-        )
-        self.params = p
-        self.state = {
-            'id': 0.0, 'iq': 0.0,
-            'omega': 0.0, 'theta': 0.0,
-        }
-        self._input = {
-            'vd': 0.0, 'vq': 0.0, 'tl': 0.0,
-        }
-
-    def set_input(self, **kwargs):
-        """Set model inputs."""
-        self._input.update(kwargs)
-
-    def get_state(self) -> _Dict[str, float]:
-        """Get current model state."""
-        s = self._model.get_state()
-        return {
-            'id': s['id'], 'iq': s['iq'],
-            'omega': s['omega_m'], 'theta': s['theta_e'],
-        }
-
-    def update(self, dt: float) -> _Dict[str, float]:
-        """Update model state for one time step."""
-        self._model.step(
-            self._input['vd'], self._input['vq'],
-            self._input['tl'], dt
-        )
-        return self.get_state()
-
-    def reset(self):
-        """Reset model state to initial values."""
-        self._model.reset()
-        self.state = {
-            'id': 0.0, 'iq': 0.0,
-            'omega': 0.0, 'theta': 0.0,
-        }
-        self._input = {
-            'vd': 0.0, 'vq': 0.0, 'tl': 0.0,
-        }
-
-    def get_torque(self) -> float:
-        """Calculate electromagnetic torque."""
-        return self._model.torque_em

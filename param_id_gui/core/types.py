@@ -1,25 +1,20 @@
 """Core data structures and type definitions for param_id_gui.
 
 Uses Pydantic for data validation and type safety.
-Updated for testing git hooks.
 """
 
+import math
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Protocol, Tuple, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import numpy as np
 
+# Re-export canonical definitions from domain-specific modules
+from .model_registry import FidelityLevel, Domain  # noqa: F401
+from .data_bus import Signal  # noqa: F401
+
 
 # ── Type Aliases ──────────────────────────────────────────────
-
-# Numeric types
-FloatArray = np.ndarray
-TimeNs = int  # Time in nanoseconds
-TimeSec = float  # Time in seconds
-
-# Parameter types
-ParamValue = Union[float, int, bool, str]
-ParamDict = Dict[str, ParamValue]
 
 
 # ── Protocols ─────────────────────────────────────────────────
@@ -38,18 +33,30 @@ class ModelProtocol(Protocol):
     def get_state(self) -> Dict[str, float]:
         """Get current model state."""
         ...
+    
+    def get_default_inputs(self) -> Dict[str, float]:
+        """Get default input dictionary for this model."""
+        ...
 
 
 class OptimizerProtocol(Protocol):
     """Protocol for optimization algorithms."""
-    
+
     def optimize(
         self,
-        residual_func: Any,
-        x0: np.ndarray,
+        func: Callable[[np.ndarray], np.ndarray],
         **kwargs: Any,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Run optimization."""
+        """Run optimization.
+
+        Args:
+            func: Objective/residual function to minimize
+            **kwargs: Algorithm-specific parameters (x0, bounds, progress_callback, etc.)
+
+        Returns:
+            Tuple of (optimized parameters, info dict with keys:
+                final_cost, iterations, converged, etc.)
+        """
         ...
 
 
@@ -64,28 +71,13 @@ class SimulationState(str, Enum):
     ERROR = "error"
 
 
-class ModelType(str, Enum):
-    """Model type enumeration."""
-    MOTOR = "motor"
-    POWER = "power"
-    CONTROLLER = "controller"
-    CUSTOM = "custom"
-
 
 class AlgorithmType(str, Enum):
     """Algorithm type enumeration."""
     LEVENBERG_MARQUARDT = "lm"
     PARTICLE_SWARM = "pso"
-    GENETIC = "ga"
-    CUSTOM = "custom"
 
-
-class FidelityLevel(int, Enum):
-    """Model fidelity level."""
-    L0_IDEAL = 0        # Ideal model
-    L1_LINEAR = 1       # Linear model
-    L2_LUMPED = 2       # Lumped parameter model
-    L3_DISTRIBUTED = 3  # Distributed parameter model
+# FidelityLevel is imported from model_registry above (L0-L4)
 
 
 # ── Data Models ───────────────────────────────────────────────
@@ -110,25 +102,48 @@ class PMSMParams(ModelParams):
     B: float = Field(default=1e-3, ge=0, description="Viscous friction [N·m·s/rad]")
     Pp: int = Field(default=4, gt=0, description="Number of pole pairs")
 
+    @field_validator("Rs", "Ld", "Lq", "flux_pm", "J", "B", mode="before")
+    @classmethod
+    def validate_positive_float(cls, v: Union[int, float]) -> float:
+        if not isinstance(v, (int, float)):
+            raise ValueError(f"Expected numeric value, got {type(v)}")
+        if math.isnan(v) or math.isinf(v):
+            raise ValueError("Value cannot be NaN or Inf")
+        return float(v)
 
-class BuckConverterParams(ModelParams):
+    @field_validator("Pp", mode="before")
+    @classmethod
+    def validate_positive_int(cls, v: Union[int, float]) -> int:
+        if not isinstance(v, (int, float)):
+            raise ValueError(f"Expected integer value, got {type(v)}")
+        if isinstance(v, float) and not v.is_integer():
+            raise ValueError(f"Pole pairs must be an integer, got {v}")
+        v = int(v)
+        if v <= 0:
+            raise ValueError("Value must be positive")
+        return v
+
+
+class ConverterParams(ModelParams):
+    """Base class for DC-DC converter parameters."""
+    
+    L: float = Field(default=100e-6, gt=0, description="Inductance [H]")
+    C: float = Field(default=100e-6, gt=0, description="Capacitance [F]")
+    f_sw: float = Field(default=100e3, gt=0, description="Switching frequency [Hz]")
+
+
+class BuckConverterParams(ConverterParams):
     """Buck converter parameters."""
     
     Vin: float = Field(default=12.0, gt=0, description="Input voltage [V]")
-    L: float = Field(default=100e-6, gt=0, description="Inductance [H]")
-    C: float = Field(default=100e-6, gt=0, description="Capacitance [F]")
     R_load: float = Field(default=10.0, gt=0, description="Load resistance [Ω]")
-    f_sw: float = Field(default=100e3, gt=0, description="Switching frequency [Hz]")
 
 
-class BoostConverterParams(ModelParams):
+class BoostConverterParams(ConverterParams):
     """Boost converter parameters."""
     
     Vin: float = Field(default=5.0, gt=0, description="Input voltage [V]")
-    L: float = Field(default=100e-6, gt=0, description="Inductance [H]")
-    C: float = Field(default=100e-6, gt=0, description="Capacitance [F]")
     R_load: float = Field(default=50.0, gt=0, description="Load resistance [Ω]")
-    f_sw: float = Field(default=100e3, gt=0, description="Switching frequency [Hz]")
 
 
 class FOCParams(ModelParams):
@@ -141,29 +156,6 @@ class FOCParams(ModelParams):
     speed_kp: float = Field(default=1.0, gt=0, description="Speed PI proportional gain")
     speed_ki: float = Field(default=0.01, gt=0, description="Speed PI integral gain")
 
-
-# ── Simulation State Models ───────────────────────────────────
-
-class SimulationStateModel(BaseModel):
-    """Simulation state data."""
-    
-    state: SimulationState = Field(default=SimulationState.IDLE, description="Current simulation state")
-    time_ns: int = Field(default=0, ge=0, description="Current simulation time [ns]")
-    step_count: int = Field(default=0, ge=0, description="Number of steps completed")
-    error_message: Optional[str] = Field(default=None, description="Error message if state is ERROR")
-
-
-class SimulationResult(BaseModel):
-    """Simulation result data."""
-    
-    success: bool = Field(description="Whether simulation completed successfully")
-    time_vector: List[float] = Field(description="Time vector [s]")
-    data: Dict[str, List[float]] = Field(description="Simulation data")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
-    error_message: Optional[str] = Field(default=None, description="Error message if failed")
-
-
-# ── Algorithm Configuration Models ────────────────────────────
 
 class LMConfig(BaseModel):
     """Levenberg-Marquardt configuration."""
@@ -180,82 +172,17 @@ class PSOConfig(BaseModel):
     """Particle Swarm Optimization configuration."""
     
     n_particles: int = Field(default=50, gt=0, description="Number of particles")
-    max_iterations: int = Field(default=100, gt=0, description="Maximum iterations")
-    w: float = Field(default=0.7, gt=0, le=1, description="Inertia weight")
-    c1: float = Field(default=1.5, gt=0, description="Cognitive parameter")
-    c2: float = Field(default=1.5, gt=0, description="Social parameter")
+    max_iterations: int = Field(default=1000, gt=0, description="Maximum iterations")
+    tolerance: float = Field(default=1e-6, gt=0, description="Convergence tolerance")
+    w: float = Field(default=0.7298, gt=0, le=1, description="Inertia weight")
+    c1: float = Field(default=1.4962, gt=0, description="Cognitive parameter")
+    c2: float = Field(default=1.4962, gt=0, description="Social parameter")
     w_decay: float = Field(default=0.99, gt=0, le=1, description="Inertia decay rate")
 
 
-class OptimizationResult(BaseModel):
-    """Optimization result data."""
-    
-    success: bool = Field(description="Whether optimization converged")
-    optimal_params: List[float] = Field(description="Optimal parameters found")
-    residual_norm: float = Field(description="Final residual norm")
-    iterations: int = Field(description="Number of iterations performed")
-    history: List[float] = Field(default_factory=list, description="Cost function history")
-    error_message: Optional[str] = Field(default=None, description="Error message if failed")
 
 
-# ── Data Bus Models ───────────────────────────────────────────
-
-class Signal(BaseModel):
-    """Signal data for data bus."""
-    
-    name: str = Field(description="Signal name")
-    value: float = Field(description="Signal value")
-    timestamp_ns: int = Field(default=0, description="Timestamp [ns]")
-    quality: int = Field(default=0xFF, description="Signal quality flags")
+# Signal is imported from data_bus above (canonical version with validation)
 
 
-class TopicConfig(BaseModel):
-    """Topic configuration for data bus."""
-    
-    name: str = Field(description="Topic name")
-    max_subscribers: int = Field(default=100, gt=0, description="Maximum subscribers")
-    history_size: int = Field(default=1000, gt=0, description="History buffer size")
 
-
-# ── HDF5 Data Models ─────────────────────────────────────────
-
-class HDF5DatasetInfo(BaseModel):
-    """HDF5 dataset information."""
-    
-    name: str = Field(description="Dataset name")
-    shape: Tuple[int, ...] = Field(description="Dataset shape")
-    dtype: str = Field(description="Dataset dtype")
-    attrs: Dict[str, Any] = Field(default_factory=dict, description="Dataset attributes")
-
-
-class HDF5GroupInfo(BaseModel):
-    """HDF5 group information."""
-    
-    name: str = Field(description="Group name")
-    datasets: List[HDF5DatasetInfo] = Field(default_factory=list, description="Datasets in group")
-    groups: List[str] = Field(default_factory=list, description="Subgroup names")
-    attrs: Dict[str, Any] = Field(default_factory=dict, description="Group attributes")
-
-
-# ── Validation Helpers ────────────────────────────────────────
-
-@field_validator("Rs", "Ld", "Lq", "flux_pm", "J", "B", mode="before")
-@classmethod
-def validate_positive_float(cls, v: float) -> float:
-    """Validate that float values are positive."""
-    if not isinstance(v, (int, float)):
-        raise ValueError(f"Expected numeric value, got {type(v)}")
-    if np.isnan(v) or np.isinf(v):
-        raise ValueError("Value cannot be NaN or Inf")
-    return float(v)
-
-
-@field_validator("Pp", mode="before")
-@classmethod
-def validate_positive_int(cls, v: int) -> int:
-    """Validate that int values are positive."""
-    if not isinstance(v, int):
-        raise ValueError(f"Expected integer value, got {type(v)}")
-    if v <= 0:
-        raise ValueError("Value must be positive")
-    return v

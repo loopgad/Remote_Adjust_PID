@@ -30,6 +30,7 @@ env/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -74,6 +75,10 @@ _skbuild/
 
 # Evidence files (generated during verification)
 .sisyphus/evidence/
+.sisyphus/plans/
+
+# Code analysis tool
+.codegraph/
 
 # Temporary files
 *.tmp

@@ -1,21 +1,16 @@
 """Unified Data Bus — timestamped, typed signal exchange.
 
-Channels:
-- realtime: ZeroMQ-style in-process pub/sub (dict-based for MVP)
-- batch: HDF5-backed persistent log
-- event: list-based event queue
-
-Security:
-  - CWE-287: Topic ACL with module registration
-  - CWE-20: Signal __post_init__ validation (NaN, Inf, negative timestamps, safety bounds)
+Provides in-process pub/sub for signal exchange between
+simulation components with signal validation (CWE-20).
 """
 
 import math
 import logging
+import threading
 from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntFlag
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,24 +20,13 @@ logger = logging.getLogger(__name__)
 class DataValidity(IntFlag):
     """Data validity flags for signal quality tracking."""
     VALID = 0x00
-    STALE = 0x01
-    INTERPOLATED = 0x02
-    EXTRAPOLATED = 0x04
-    CLIPPED = 0x08
-    NOISY = 0x10
-    OUT_OF_RANGE = 0x20
-    SENSOR_FAULT = 0x40
-    SIMULATED = 0x80
     INVALID = 0x100  # SECURITY: corrupted data
 
 
 # ── safety levels ────────────────────────────────────────────
 
 SAFETY_NORMAL = 0
-SAFETY_WARNING = 1
-SAFETY_CRITICAL = 2
-SAFETY_EMERGENCY = 3
-VALID_SAFETY_LEVELS = {SAFETY_NORMAL, SAFETY_WARNING, SAFETY_CRITICAL, SAFETY_EMERGENCY}
+VALID_SAFETY_LEVELS = {SAFETY_NORMAL}
 
 
 # ── base signal ──────────────────────────────────────────────
@@ -108,30 +92,10 @@ class Signal:
         return self.timestamp_ns / 1e9
 
 
-# ── event ────────────────────────────────────────────────────
-
-@dataclass
-class SimEvent:
-    """Discrete simulation event."""
-
-    EVENT_TYPES = {"FAULT", "LIMIT_HIT", "STATE_CHANGE", "USER", "DIVERGENCE"}
-
-    event_type: str
-    source: str
-    timestamp_ns: int = 0
-    payload: Dict[str, Any] = field(default_factory=dict)
-
-
 # ── data bus ─────────────────────────────────────────────────
 
 class DataBus:
-    """In-process unified data bus with security enforcement (CWE-287).
-
-    Security features:
-      - Module registration (authentication)
-      - Topic ACL (authorization)
-      - Signal validation at boundary (CWE-20)
-    """
+    """In-process unified data bus with signal validation (CWE-20)."""
 
     def __init__(self, max_history: int = 10000):
         """Initialize data bus.
@@ -142,42 +106,9 @@ class DataBus:
         self._latest: Dict[str, Signal] = {}
         self._subscribers: Dict[str, List[Callable]] = defaultdict(list)
         self._history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history))
-        self._events: List[SimEvent] = []
         self._seq: int = 0
         self._max_history: int = max_history
-
-        # Security: module registry + topic ACL
-        self._registered_modules: Dict[str, bool] = {}   # module_id → authenticated
-        self._topic_acls: Dict[str, Set[str]] = {}        # topic → set of allowed module_ids
-
-    # ── security: module auth ──────────────────────────────
-
-    def register_module(self, module_id: str) -> None:
-        """Authenticate a module to the data bus.
-
-        Args:
-            module_id: Unique module identifier (e.g. "sensor:current_phase_a").
-        """
-        if "://" not in module_id:
-            module_id = f"module://{module_id}"
-        self._registered_modules[module_id] = True
-        logger.info("Module registered: %s", module_id)
-
-    def restrict_topic(self, topic: str, allowed_modules: List[str]) -> None:
-        """Set access control: only allowed modules can publish to topic.
-
-        Args:
-            topic: Topic name.
-            allowed_modules: Module IDs allowed to publish.
-        """
-        normalized = set()
-        for m in allowed_modules:
-            if "://" not in m:
-                m = f"module://{m}"
-            normalized.add(m)
-        self._topic_acls[topic] = normalized
-        logger.info("Topic '%s' restricted to modules: %s", topic,
-                    [m.split("://")[1] for m in normalized])
+        self._lock = threading.Lock()
 
     # ── publish ─────────────────────────────────────────────
 
@@ -188,45 +119,24 @@ class DataBus:
         Args:
             topic: Topic name.
             signal: Signal to publish.
-            module_id: Publishing module (required for ACL check).
-
-        Raises:
-            PermissionError: If module is not authorized on this topic.
+            module_id: Publishing module (unused, kept for API compat).
         """
-        # SECURITY: ACL check
-        if topic in self._topic_acls:
-            if not module_id or module_id not in self._registered_modules:
-                raise PermissionError(
-                    f"Unregistered module '{module_id}' cannot publish to '{topic}'")
-            if module_id not in self._topic_acls[topic]:
-                allowed = self._topic_acls[topic]
-                logger.warning("ACCESS DENIED: module '%s' on topic '%s' "
-                               "(allowed: %s)", module_id, topic,
-                               [m.split("://")[1] for m in allowed])
-                return
-
         # SECURITY: Signal validated in __post_init__ (CWE-20)
-        self._seq += 1
-        signal.sequence_id = self._seq
-        self._latest[topic] = signal
+        with self._lock:
+            self._seq += 1
+            signal.sequence_id = self._seq
+            self._latest[topic] = signal
 
-        # Ring buffer
-        self._history[topic].append(signal)
+            # Ring buffer
+            self._history[topic].append(signal)
 
-        # Notify subscribers
-        for cb in self._subscribers.get(topic, []):
+            subscribers = tuple(self._subscribers.get(topic, []))
+
+        for cb in subscribers:
             try:
                 cb(signal)
             except Exception:
                 logger.exception("Subscriber callback failed for %s", topic)
-
-    def publish_event(self, event: SimEvent) -> None:
-        """Publish a simulation event.
-
-        Args:
-            event: Event to publish
-        """
-        self._events.append(event)
 
     def publish_scalar(self, topic: str, value: float, unit: str = "",
                        timestamp_ns: int = 0, module_id: str = "") -> Signal:
@@ -249,27 +159,6 @@ class DataBus:
         self.publish(topic, sig, module_id=module_id)
         return sig
 
-    def publish_vector(self, topic: str, values: Dict[str, float],
-                       unit: str = "", timestamp_ns: int = 0,
-                       module_id: str = "") -> Dict[str, Signal]:
-        """Publish a vector of values as signals.
-
-        Args:
-            topic: Topic name prefix
-            values: Dictionary of {name: value}
-            unit: SI unit
-            timestamp_ns: Timestamp in nanoseconds
-            module_id: Publishing module
-
-        Returns:
-            Dictionary of {name: Signal}
-        """
-        sigs = {}
-        for name, val in values.items():
-            full = f"{topic}/{name}"
-            sigs[name] = self.publish_scalar(full, val, unit, timestamp_ns, module_id)
-        return sigs
-
     # ── subscribe / read ─────────────────────────────────────
 
     def subscribe(self, topic: str, callback: Callable[[Signal], None]) -> None:
@@ -279,7 +168,22 @@ class DataBus:
             topic: Topic name
             callback: Callback function for new signals
         """
-        self._subscribers[topic].append(callback)
+        with self._lock:
+            self._subscribers[topic].append(callback)
+
+    def unsubscribe(self, topic: str, callback: Callable[[Signal], None]) -> None:
+        """Remove a subscription.
+
+        Args:
+            topic: Topic name
+            callback: Callback to remove
+        """
+        with self._lock:
+            if topic in self._subscribers:
+                try:
+                    self._subscribers[topic].remove(callback)
+                except ValueError:
+                    pass  # callback not found, already unsubscribed
 
     def read_latest(self, topic: str) -> Optional[Signal]:
         """Read latest signal from a topic.
@@ -302,32 +206,20 @@ class DataBus:
         Returns:
             List of Signals
         """
-        hist = self._history.get(topic, deque())
-        return list(hist)[-max_count:] if hist else []
+        hist = self._history.get(topic)
+        if not hist:
+            return []
+        # deque slice is O(1) for small slices, O(n) for list(hist)
+        if len(hist) <= max_count:
+            return list(hist)
+        return [hist[i] for i in range(len(hist) - max_count, len(hist))]
 
-    # ── snapshot / reset ─────────────────────────────────────
-
-    def snapshot(self) -> dict:
-        """Create a snapshot of current bus state."""
-        return {
-            "latest": {k: v for k, v in self._latest.items()},
-            "seq": self._seq,
-        }
+    # ── reset ─────────────────────────────────────────────────
 
     def reset(self) -> None:
         """Reset the data bus."""
-        self._latest.clear()
-        self._subscribers.clear()
-        self._history.clear()
-        self._events.clear()
-        self._seq = 0
-        self._registered_modules.clear()
-        self._topic_acls.clear()
-
-    def get_topics(self) -> List[str]:
-        """Get list of all topics.
-
-        Returns:
-            List of topic names
-        """
-        return list(self._latest.keys())
+        with self._lock:
+            self._latest.clear()
+            self._subscribers.clear()
+            self._history.clear()
+            self._seq = 0

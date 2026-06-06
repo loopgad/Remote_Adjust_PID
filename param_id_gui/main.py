@@ -2,11 +2,6 @@
 
 import sys
 import logging
-from pathlib import Path
-
-# Add the project root to the Python path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
 
 # Configure logging
 logging.basicConfig(
@@ -50,6 +45,10 @@ def main():
         
         # Create application
         app = QApplication(sys.argv)
+
+        # Apply design system
+        from param_id_gui.gui.theme import apply_theme
+        apply_theme(app)
         
         # Create and show main window
         window = MainWindow()
@@ -77,16 +76,15 @@ def _register_default_models(registry: 'ModelRegistry') -> None:
     """
     from param_id_gui.models.motor.pmsm_dq import PMSMdqModel
     from param_id_gui.models.power.power_models import BuckConverter, BoostConverter
-    from param_id_gui.core.model_registry import ModelMetadata
-    from param_id_gui.core.types import ModelType, FidelityLevel
+    from param_id_gui.core.model_registry import ModelMetadata, Domain, FidelityLevel
     
     # Register PMSM model
     try:
-        pmsm = PMSMdqModel()
+        pmsm = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4)
         pmsm_meta = ModelMetadata(
             model_id="PMSM",
             model_name="PMSM dq-axis Model",
-            domain=ModelType.MOTOR,
+            domain=Domain.MOTOR,
             fidelity=FidelityLevel.L2_LUMPED,
             version="1.0.0",
             sim_step_ns=50000  # 50μs
@@ -102,7 +100,7 @@ def _register_default_models(registry: 'ModelRegistry') -> None:
         buck_meta = ModelMetadata(
             model_id="Buck Converter",
             model_name="Buck Converter Model",
-            domain=ModelType.POWER,
+            domain=Domain.POWER,
             fidelity=FidelityLevel.L2_LUMPED,
             version="1.0.0",
             sim_step_ns=10000  # 10μs
@@ -118,7 +116,7 @@ def _register_default_models(registry: 'ModelRegistry') -> None:
         boost_meta = ModelMetadata(
             model_id="Boost Converter",
             model_name="Boost Converter Model",
-            domain=ModelType.POWER,
+            domain=Domain.POWER,
             fidelity=FidelityLevel.L2_LUMPED,
             version="1.0.0",
             sim_step_ns=10000  # 10μs

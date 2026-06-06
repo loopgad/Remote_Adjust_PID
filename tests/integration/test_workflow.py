@@ -1,4 +1,4 @@
-"""Task 21: 端到端集成测试 - 验证完整工作流（配置 → 仿真 → 识别 → 结果）.
+"""End-to-end integration tests - complete workflow (config → simulation → identification → results).
 
 Tests the complete workflow from model configuration through simulation,
 parameter identification, and result validation.
@@ -17,8 +17,6 @@ from param_id_gui.core.model_registry import ModelRegistry, ModelMetadata, Domai
 from param_id_gui.algorithms.lm import LevenbergMarquardt, LMConfig
 from param_id_gui.algorithms.pso import ParticleSwarmOptimization, PSOConfig
 from param_id_gui.data.hdf5_handler import HDF5Handler
-from param_id_gui.utils.validation import InputValidator
-from param_id_gui.utils.safety import NumericalSafety
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -41,7 +39,7 @@ def _run_pmsm_open_loop(model, steps=1000, dt=50e-6, vd=10.0, vq=5.0):
     """Run PMSM open-loop simulation."""
     states = []
     for _ in range(steps):
-        model.step(vd, vq, dt=dt)
+        model.step_dq(vd, vq, dt=dt)
         states.append(model.get_state())
     return states
 
@@ -53,13 +51,7 @@ class TestEndToEndWorkflow:
 
     def test_pmsm_config_to_simulation(self, pmsm_params):
         """Test PMSM from configuration to simulation."""
-        # Step 1: Validate parameters
-        for key, val in pmsm_params.items():
-            InputValidator.validate_numeric(val, key)
-            if isinstance(val, (int, float)) and val > 0:
-                InputValidator.validate_positive(val, key)
-
-        # Step 2: Create model
+        # Step 1: Create model
         model = _make_pmsm(pmsm_params)
         assert model.Rs == pmsm_params["Rs"]
         assert model.Ld == pmsm_params["Ld"]
@@ -78,11 +70,7 @@ class TestEndToEndWorkflow:
 
     def test_buck_config_to_steady_state(self, buck_params):
         """Test Buck converter from configuration to steady-state."""
-        # Step 1: Validate parameters
-        for key, val in buck_params.items():
-            InputValidator.validate_numeric(val, key)
-
-        # Step 2: Create model
+        # Step 1: Create model
         model = BuckConverter()
 
         # Step 3: Set inputs and run
@@ -107,7 +95,7 @@ class TestEndToEndWorkflow:
         # Register model stepper
         def pmsm_step(step_ns):
             dt = step_ns / 1e9
-            model.step(10.0, 5.0, dt=dt)
+            model.step_dq(10.0, 5.0, dt=dt)
             from param_id_gui.core.orchestrator import StepResult
             return StepResult(solver_id="pmsm", converged=True)
 
@@ -131,7 +119,6 @@ class TestEndToEndWorkflow:
             received.append(sig)
 
         bus.subscribe("motor/speed", on_signal)
-        bus.register_module("pmsm_model")
 
         # Publish signals
         for i in range(10):
@@ -229,7 +216,7 @@ class TestErrorHandling:
         """Test PMSM rejects invalid parameters gracefully."""
         # NaN input should be guarded
         model = _make_pmsm()
-        model.step(float("nan"), float("nan"))
+        model.step_dq(float("nan"), float("nan"))
         # Model should not crash, state should be finite
         state = model.get_state()
         assert all(math.isfinite(v) for v in state.values())
@@ -264,7 +251,6 @@ class TestErrorHandling:
     def test_data_bus_nan_signal(self):
         """Test data bus handles NaN signal values."""
         bus = DataBus()
-        bus.register_module("test")
 
         sig = Signal(
             source="test", signal_type="voltage",

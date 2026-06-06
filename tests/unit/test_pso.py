@@ -12,6 +12,14 @@ from typing import Tuple
 from param_id_gui.algorithms.pso import PSOConfig, ParticleSwarmOptimization
 
 
+@pytest.fixture(autouse=True)
+def _isolate_random():
+    """Save and restore numpy global random state to prevent cross-test pollution."""
+    state = np.random.get_state()
+    yield
+    np.random.set_state(state)
+
+
 # ── 测试函数定义 ───────────────────────────────────────────────
 
 def sphere(x: np.ndarray) -> float:
@@ -59,7 +67,8 @@ def run_pso_optimize(
     seed: int = 42,
 ) -> Tuple[np.ndarray, dict]:
     """以固定随机种子运行 PSO，确保结果可复现。"""
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
+    np.random.seed(seed)  # PSO 内部使用 np.random，需要全局种子
     pso = ParticleSwarmOptimization(config)
     return pso.optimize(objective_func, bounds)
 
@@ -77,8 +86,8 @@ class TestPSOAccuracy:
 
         # expected 为零向量，使用绝对误差
         rel_error = compute_relative_error(result, np.array([0.0, 0.0]))
-        assert rel_error < 0.5, (
-            f"Sphere 2D 精度不足: 绝对误差 {rel_error:.6f} >= 0.5, "
+        assert rel_error < 0.25, (
+            f"Sphere 2D 精度不足: 绝对误差 {rel_error:.6f} >= 0.25, "
             f"结果={result}, 期望=[0,0]"
         )
         assert info["final_cost"] < 0.25, (
@@ -107,8 +116,8 @@ class TestPSOAccuracy:
 
         expected = np.array([1.0, 1.0])
         rel_error = compute_relative_error(result, expected)
-        assert rel_error < 0.50, (
-            f"Rosenbrock 2D 精度不足: 相对误差 {rel_error:.6f} >= 50%, "
+        assert rel_error < 0.3, (
+            f"Rosenbrock 2D 精度不足: 相对误差 {rel_error:.6f} >= 30%, "
             f"结果={result}, 期望=[1,1]"
         )
 
@@ -181,6 +190,7 @@ class TestPSOConvergence:
     def test_more_particles_faster_convergence(self):
         """验证增加粒子数减少迭代次数（在合理范围内）。"""
         bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        rng = np.random.default_rng(42)
 
         # 使用相同随机种子，比较不同粒子数的迭代次数
         np.random.seed(42)
@@ -203,6 +213,7 @@ class TestPSOConvergence:
         """验证 PSO 收敛时间在合理范围内（< 30秒）。"""
         bounds = (np.array([-10.0, -10.0]), np.array([10.0, 10.0]))
         config = PSOConfig(n_particles=50, max_iterations=500, tolerance=1e-6)
+        rng = np.random.default_rng(333)
 
         np.random.seed(333)
         pso = ParticleSwarmOptimization(config)
@@ -216,6 +227,7 @@ class TestPSOConvergence:
     def test_high_tolerance_fewer_iterations(self):
         """验证高容差（宽松）比低容差（严格）需要更少迭代。"""
         bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        rng = np.random.default_rng(444)
 
         np.random.seed(444)
         config_loose = PSOConfig(n_particles=50, max_iterations=500, tolerance=1e-2)
@@ -293,7 +305,7 @@ class TestPSOBounds:
         config = PSOConfig(n_particles=30, max_iterations=300, tolerance=1e-6)
         _, info = run_pso_optimize(sphere, bounds, config, seed=777)
 
-        assert info["converged"] is True or info["final_cost"] < 0.01, (
+        assert info["converged"] is True, (
             f"窄边界下未收敛: converged={info['converged']}, "
             f"final_cost={info['final_cost']:.6e}"
         )
@@ -326,6 +338,7 @@ class TestPSOConfig:
 
     def test_get_history(self):
         """验证 get_history() 返回完整历史。"""
+        rng = np.random.default_rng(888)
         np.random.seed(888)
         config = PSOConfig(n_particles=30, max_iterations=100, tolerance=1e-6)
         pso = ParticleSwarmOptimization(config)
@@ -340,6 +353,7 @@ class TestPSOConfig:
 
     def test_get_iterations(self):
         """验证 get_iterations() 返回正确迭代次数。"""
+        rng = np.random.default_rng(999)
         np.random.seed(999)
         config = PSOConfig(n_particles=30, max_iterations=100, tolerance=1e-6)
         pso = ParticleSwarmOptimization(config)
@@ -353,6 +367,7 @@ class TestPSOConfig:
 
     def test_x0_initialization(self):
         """验证 x0 参数被用作第一个粒子的初始位置。"""
+        rng = np.random.default_rng(101)
         np.random.seed(101)
         config = PSOConfig(n_particles=10, max_iterations=50)
         pso = ParticleSwarmOptimization(config)
@@ -380,6 +395,7 @@ class TestPSOStability:
         success_count = 0
 
         for i in range(n_runs):
+            rng = np.random.default_rng(i * 100 + 42)
             np.random.seed(i * 100 + 42)
             pso = ParticleSwarmOptimization(config)
             result, info = pso.optimize(sphere, bounds)
@@ -403,6 +419,100 @@ class TestPSOStability:
         assert not np.any(np.isinf(result)), f"结果包含 Inf: {result}"
         assert not np.isnan(info["final_cost"]), "最终代价为 NaN"
         assert not np.isinf(info["final_cost"]), "最终代价为 Inf"
+
+
+class TestPSOProgressCallback:
+    """PSO 进度回调测试（Bug #1+#2 附带功能）"""
+
+    def test_callback_called(self):
+        """回调被调用"""
+        bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        config = PSOConfig(n_particles=20, max_iterations=50, tolerance=1e-10)
+        rng = np.random.default_rng(42)
+        np.random.seed(42)
+        pso = ParticleSwarmOptimization(config)
+        call_log = []
+
+        def callback(iteration, cost, params):
+            call_log.append((iteration, cost))
+            return True
+
+        pso.optimize(sphere, bounds, progress_callback=callback)
+
+        assert len(call_log) > 0
+        assert call_log[0][0] == 1
+
+    def test_callback_returns_false_terminates(self):
+        """回调返回 False 提前终止"""
+        bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        config = PSOConfig(n_particles=20, max_iterations=1000, tolerance=1e-15)
+        rng = np.random.default_rng(42)
+        np.random.seed(42)
+        pso = ParticleSwarmOptimization(config)
+        call_count = 0
+
+        def callback(iteration, cost, params):
+            nonlocal call_count
+            call_count += 1
+            return call_count < 2
+
+        pso.optimize(sphere, bounds, progress_callback=callback)
+
+        assert call_count == 2
+
+    def test_callback_none_no_error(self):
+        """不传回调无异常"""
+        bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        config = PSOConfig(n_particles=10, max_iterations=10)
+        rng = np.random.default_rng(42)
+        np.random.seed(42)
+        pso = ParticleSwarmOptimization(config)
+        result, info = pso.optimize(sphere, bounds, progress_callback=None)
+        assert info['iterations'] > 0
+
+
+class TestPSONaNHandling:
+    """NaN/Inf 成本值处理（C-2）"""
+
+    def test_nan_cost_handled(self):
+        """目标函数返回 NaN 时粒子不死亡，全局最优不受污染"""
+        call_count = [0]
+
+        def nan_sometimes(x):
+            call_count[0] += 1
+            if call_count[0] == 3:
+                return float('nan')
+            return float(np.sum(x ** 2))
+
+        bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        config = PSOConfig(n_particles=10, max_iterations=5)
+        rng = np.random.default_rng(42)
+        np.random.seed(42)
+        pso = ParticleSwarmOptimization(config)
+        result, info = pso.optimize(nan_sometimes, bounds)
+
+        # Global best should be finite, not NaN
+        assert np.isfinite(info['final_cost']), (
+            f"Global best cost is {info['final_cost']}, expected finite"
+        )
+
+    def test_inf_cost_handled(self):
+        """目标函数返回 Inf 时不污染全局最优"""
+        def inf_at_origin(x):
+            if np.allclose(x, 0):
+                return float('inf')
+            return float(np.sum(x ** 2))
+
+        bounds = (np.array([-5.0, -5.0]), np.array([5.0, 5.0]))
+        config = PSOConfig(n_particles=10, max_iterations=5)
+        rng = np.random.default_rng(42)
+        np.random.seed(42)
+        pso = ParticleSwarmOptimization(config)
+        result, info = pso.optimize(inf_at_origin, bounds)
+
+        assert np.isfinite(info['final_cost']), (
+            f"Global best cost is {info['final_cost']}, expected finite"
+        )
 
 
 if __name__ == "__main__":

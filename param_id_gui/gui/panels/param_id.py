@@ -4,20 +4,18 @@ Provides interface for defining objective functions, selecting algorithms,
 and displaying identification results.
 """
 
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, Callable
+import threading
 import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QGroupBox, QComboBox,
-    QDoubleSpinBox, QSpinBox, QCheckBox, QTextEdit,
+    QDoubleSpinBox, QSpinBox, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QProgressBar, QSplitter, QMessageBox, QLineEdit
+    QProgressBar, QSplitter, QMessageBox, QFileDialog
 )
 from PySide6.QtCore import Qt, Signal, QThread
-from PySide6.QtGui import QFont, QColor
-
-from param_id_gui.core.types import AlgorithmType
 
 
 class OptimizationWorker(QThread):
@@ -42,11 +40,11 @@ class OptimizationWorker(QThread):
         self._params = params
         self._objective_fn = objective_fn
         self._initial_guess = initial_guess
-        self._is_running = False
+        self._stop_event = threading.Event()
     
     def run(self):
         """Run optimization."""
-        self._is_running = True
+        self._stop_event.clear()
         
         try:
             if self._algorithm == "LM":
@@ -58,71 +56,83 @@ class OptimizationWorker(QThread):
         except Exception as e:
             self.optimization_error.emit(str(e))
         finally:
-            self._is_running = False
+            self._stop_event.set()
     
     def _run_lm(self):
         """Run Levenberg-Marquardt optimization."""
-        from param_id_gui.algorithms.lm import LevenbergMarquardt
-        
-        lm = LevenbergMarquardt(
-            max_iter=self._params.get("max_iter", 100),
-            tol=self._params.get("tol", 1e-6),
+        from param_id_gui.core.optimization_service import OptimizationService
+        from param_id_gui.core.types import LMConfig
+
+        config = LMConfig(
+            max_iterations=self._params.get("max_iter", 100),
+            tolerance=self._params.get("tol", 1e-6),
             lambda_init=self._params.get("lambda_init", 0.001)
         )
-        
+
         def callback(iteration, cost, params):
             self.progress_updated.emit(iteration, cost)
-            return self._is_running
-        
-        result = lm.optimize(
-            self._objective_fn,
-            self._initial_guess,
-            callback=callback
+            return not self._stop_event.is_set()
+
+        x, info = OptimizationService.run_lm(
+            config=config,
+            residual_fn=self._objective_fn,
+            x0=self._initial_guess,
+            progress_callback=callback,
         )
         
         self.optimization_finished.emit({
             "algorithm": "LM",
-            "params": result["params"].tolist(),
-            "cost": result["cost"],
-            "iterations": result["iterations"],
-            "converged": result["converged"],
+            "params": x.tolist(),
+            "cost": info["final_cost"],
+            "iterations": info["iterations"],
+            "converged": info["converged"],
         })
     
     def _run_pso(self):
         """Run Particle Swarm Optimization."""
-        from param_id_gui.algorithms.pso import PSO
-        
-        pso = PSO(
+        from param_id_gui.core.optimization_service import OptimizationService
+        from param_id_gui.core.types import PSOConfig
+
+        config = PSOConfig(
             n_particles=self._params.get("n_particles", 30),
-            max_iter=self._params.get("max_iter", 100),
+            max_iterations=self._params.get("max_iter", 100),
             w=self._params.get("w", 0.7),
             c1=self._params.get("c1", 1.5),
             c2=self._params.get("c2", 1.5)
         )
-        
+
         def callback(iteration, cost, params):
             self.progress_updated.emit(iteration, cost)
-            return self._is_running
-        
+            return not self._stop_event.is_set()
+
         bounds = self._params.get("bounds", None)
-        result = pso.optimize(
-            self._objective_fn,
-            self._initial_guess,
-            bounds=bounds,
-            callback=callback
+        if bounds is None:
+            self.optimization_error.emit("PSO requires bounds")
+            return
+        
+        bounds_arr = (
+            np.array([b[0] for b in bounds]),
+            np.array([b[1] for b in bounds]),
+        )
+        x, info = OptimizationService.run_pso(
+            config=config,
+            objective_fn=self._objective_fn,
+            bounds=bounds_arr,
+            x0=self._initial_guess,
+            progress_callback=callback,
         )
         
         self.optimization_finished.emit({
             "algorithm": "PSO",
-            "params": result["best_params"].tolist(),
-            "cost": result["best_cost"],
-            "iterations": result["iterations"],
-            "converged": result["converged"],
+            "params": x.tolist(),
+            "cost": info["final_cost"],
+            "iterations": info["iterations"],
+            "converged": info["converged"],
         })
     
     def stop(self):
         """Stop optimization."""
-        self._is_running = False
+        self._stop_event.set()
 
 
 class ParamIDPanel(QWidget):
@@ -226,7 +236,7 @@ class ParamIDPanel(QWidget):
         self._init_params_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         
         # Default parameters
-        default_params = ["Rs", "Ld", "Lq", "psi_f"]
+        default_params = ["Rs", "Ld", "Lq", "flux_pm"]
         for i, param in enumerate(default_params):
             self._init_params_table.setItem(i, 0, QTableWidgetItem(param))
             self._init_params_table.setItem(i, 1, QTableWidgetItem("0.0"))
@@ -252,12 +262,12 @@ class ParamIDPanel(QWidget):
         control_layout = QHBoxLayout()
         
         self._start_btn = QPushButton("Start Identification")
-        self._start_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self._start_btn.setObjectName("primaryButton")
         self._start_btn.clicked.connect(self._on_start)
         control_layout.addWidget(self._start_btn)
         
         self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setStyleSheet("background-color: #f44336; color: white;")
+        self._stop_btn.setObjectName("dangerButton")
         self._stop_btn.clicked.connect(self._on_stop)
         self._stop_btn.setEnabled(False)
         control_layout.addWidget(self._stop_btn)
@@ -349,19 +359,21 @@ class ParamIDPanel(QWidget):
         """Handle algorithm selection change."""
         is_lm = index == 0
         
-        # Show/hide LM-specific parameters
-        self._lambda_spin.setVisible(is_lm)
-        self._lambda_spin.setEnabled(is_lm)
+        # Show/hide LM-specific parameters (including labels)
+        for widget in (self._lambda_spin,):
+            label = self._algo_params_layout.labelForField(widget)
+            if label:
+                label.setVisible(is_lm)
+            widget.setVisible(is_lm)
+            widget.setEnabled(is_lm)
         
-        # Show/hide PSO-specific parameters
-        self._n_particles_spin.setVisible(not is_lm)
-        self._n_particles_spin.setEnabled(not is_lm)
-        self._w_spin.setVisible(not is_lm)
-        self._w_spin.setEnabled(not is_lm)
-        self._c1_spin.setVisible(not is_lm)
-        self._c1_spin.setEnabled(not is_lm)
-        self._c2_spin.setVisible(not is_lm)
-        self._c2_spin.setEnabled(not is_lm)
+        # Show/hide PSO-specific parameters (including labels)
+        for widget in (self._n_particles_spin, self._w_spin, self._c1_spin, self._c2_spin):
+            label = self._algo_params_layout.labelForField(widget)
+            if label:
+                label.setVisible(not is_lm)
+            widget.setVisible(not is_lm)
+            widget.setEnabled(not is_lm)
     
     def _add_parameter(self):
         """Add a new parameter row."""
@@ -422,9 +434,14 @@ class ParamIDPanel(QWidget):
                 try:
                     # Parse bounds string like "[-100, 100]"
                     bounds_str = item.text().strip("[]")
-                    low, high = map(float, bounds_str.split(","))
+                    parts = bounds_str.split(",")
+                    if len(parts) != 2:
+                        raise ValueError("Expected two values")
+                    low, high = map(float, parts)
+                    if low > high:
+                        raise ValueError("Lower bound > upper bound")
                     bounds.append((low, high))
-                except:
+                except (ValueError, AttributeError):
                     bounds.append((-100, 100))
             else:
                 bounds.append((-100, 100))
@@ -446,6 +463,15 @@ class ParamIDPanel(QWidget):
         
         self.identification_started.emit(algorithm, params)
         
+        # Stop old worker if still running
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+            if not self._worker.wait(3000):
+                self._worker.terminate()
+                self._worker.wait()
+            self._worker.deleteLater()
+            self._worker = None
+        
         self._worker = OptimizationWorker(
             algorithm, params, self._objective_fn, initial_guess
         )
@@ -464,7 +490,21 @@ class ParamIDPanel(QWidget):
         """Handle progress update."""
         self._progress_label.setText(f"Iteration {iteration}, Cost: {cost:.6f}")
         self._log_text.append(f"Iteration {iteration}: cost = {cost:.6f}")
-        
+
+        # Update progress bar
+        max_iter = self._max_iter_spin.value()
+        if max_iter > 0:
+            pct = min(int(iteration / max_iter * 100), 100)
+            self._progress_bar.setValue(pct)
+
+        # Limit log to last 1000 lines
+        doc = self._log_text.document()
+        if doc.blockCount() > 1000:
+            cursor = self._log_text.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.movePosition(cursor.MoveOperation.Down, cursor.MoveMode.KeepAnchor, doc.blockCount() - 1000)
+            cursor.removeSelectedText()
+
         # Auto-scroll to bottom
         scrollbar = self._log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -475,6 +515,11 @@ class ParamIDPanel(QWidget):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._export_btn.setEnabled(True)
+        
+        # Clean up worker
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
         
         # Update summary
         self._cost_label.setText(f"{results['cost']:.6f}")
@@ -504,7 +549,7 @@ class ParamIDPanel(QWidget):
                     if initial != 0:
                         error_pct = abs(identified_params[row] - initial) / abs(initial) * 100
                         self._results_table.setItem(row, 3, QTableWidgetItem(f"{error_pct:.2f}%"))
-                except:
+                except (ValueError, ZeroDivisionError, TypeError):
                     pass
         
         self._log_text.append(f"\nOptimization finished!")
@@ -519,16 +564,43 @@ class ParamIDPanel(QWidget):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         
+        # Clean up worker
+        if self._worker:
+            self._worker.deleteLater()
+            self._worker = None
+        
         self._log_text.append(f"\nError: {error_msg}")
         QMessageBox.critical(self, "Optimization Error", error_msg)
     
     def _export_results(self):
-        """Export optimization results."""
+        """Export optimization results to CSV."""
         if self._results is None:
             return
-        
-        # TODO: Implement export functionality
-        QMessageBox.information(self, "Export", "Export functionality not yet implemented")
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Results", "", "CSV Files (*.csv)")
+        if not path:
+            return
+
+        try:
+            import csv
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Parameter", "Identified", "Initial", "Error %"])
+                params = self._results.get("params", [])
+                for i, val in enumerate(params):
+                    param_name = self._init_params_table.item(i, 0).text() if i < self._init_params_table.rowCount() else f"param_{i}"
+                    init_item = self._init_params_table.item(i, 1)
+                    initial = float(init_item.text()) if init_item else 0.0
+                    error_pct = abs(val - initial) / abs(initial) * 100 if initial != 0 else 0.0
+                    writer.writerow([param_name, f"{val:.6f}", f"{initial:.6f}", f"{error_pct:.2f}"])
+                writer.writerow([])
+                writer.writerow(["Final Cost", self._results.get("cost", "N/A")])
+                writer.writerow(["Iterations", self._results.get("iterations", "N/A")])
+                writer.writerow(["Converged", self._results.get("converged", "N/A")])
+            QMessageBox.information(self, "Export", f"Results exported to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export:\n{e}")
     
     def set_objective_function(self, fn: Callable):
         """Set the objective function for optimization."""

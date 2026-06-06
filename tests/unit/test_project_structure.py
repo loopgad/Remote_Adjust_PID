@@ -35,7 +35,6 @@ def test_project_structure():
     assert (project_root / "param_id_gui" / "gui").is_dir()
     assert (project_root / "param_id_gui" / "gui" / "main_window.py").is_file()
     assert (project_root / "param_id_gui" / "gui" / "panels").is_dir()
-    assert (project_root / "param_id_gui" / "gui" / "widgets").is_dir()
     
     # Check C++ module
     assert (project_root / "param_id_gui" / "cpp").is_dir()
@@ -44,11 +43,6 @@ def test_project_structure():
     # Check data module
     assert (project_root / "param_id_gui" / "data").is_dir()
     assert (project_root / "param_id_gui" / "data" / "hdf5_handler.py").is_file()
-    
-    # Check utils
-    assert (project_root / "param_id_gui" / "utils").is_dir()
-    assert (project_root / "param_id_gui" / "utils" / "validation.py").is_file()
-    assert (project_root / "param_id_gui" / "utils" / "safety.py").is_file()
     
     # Check tests
     assert (project_root / "tests").is_dir()
@@ -79,7 +73,7 @@ def test_core_imports():
     assert orchestrator.get_state() == SimulationState.IDLE
     
     data_bus = DataBus()
-    assert data_bus.get_topics() == []
+    assert data_bus.read_latest("nonexistent") is None
     
     registry = ModelRegistry()
     assert registry.list_models() == []
@@ -87,13 +81,13 @@ def test_core_imports():
 
 def test_model_imports():
     """Test that model modules can be imported."""
-    from param_id_gui.models.motor.pmsm_dq import PMSMModel
+    from param_id_gui.models.motor.pmsm_dq import PMSMdqModel
     from param_id_gui.models.power.power_models import BuckConverter, BoostConverter
     from param_id_gui.models.controller.foc import FOCController
     
     # Test basic instantiation
-    pmsm = PMSMModel()
-    assert pmsm.params.Rs == 0.5
+    pmsm = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4)
+    assert pmsm.Rs == 0.5
     
     buck = BuckConverter()
     assert buck.params.Vin == 12.0
@@ -102,7 +96,7 @@ def test_model_imports():
     assert boost.params.Vin == 5.0
     
     foc = FOCController()
-    assert foc.pi_id.kp == 5.0  # Default value from sim_platform
+    assert foc.pi_id.kp == 5.0
 
 
 def test_algorithm_imports():
@@ -116,16 +110,6 @@ def test_algorithm_imports():
     
     pso = ParticleSwarmOptimization()
     assert pso.config.n_particles == 50
-
-
-def test_utility_imports():
-    """Test that utility modules can be imported."""
-    from param_id_gui.utils.validation import InputValidator
-    from param_id_gui.utils.safety import NumericalSafety
-    
-    # Test basic functionality
-    assert InputValidator.validate_numeric(1.0, "test") == 1.0
-    assert NumericalSafety.clamp(5.0, 0.0, 10.0) == 5.0
 
 
 def test_data_imports():

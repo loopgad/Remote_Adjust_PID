@@ -15,6 +15,7 @@ namespace models {
 // PMSMModel实现
 // ============================================================================
 
+PMSMModel::PMSMModel() : params_(Params{}) {}
 PMSMModel::PMSMModel(const Params& params) : params_(params) {}
 
 ModelOutput PMSMModel::step(const std::vector<double>& inputs, double dt) {
@@ -59,10 +60,15 @@ double PMSMModel::calc_power_loss(double id, double iq, double vd, double vq) co
 }
 
 std::array<double, 3> PMSMModel::state_equations(double vd, double vq, double Tl) const {
-    double did = (vd - params_.Rs * id_ + params_.p * we_ * params_.Lq * iq_) / params_.Ld;
-    double diq = (vq - params_.Rs * iq_ - params_.p * we_ * params_.Ld * id_ - params_.p * we_ * params_.lambda_m) / params_.Lq;
+    constexpr double EPS_L = 1e-12;
+    constexpr double EPS_J = 1e-15;
+    double Ld = std::max(std::abs(params_.Ld), EPS_L);
+    double Lq = std::max(std::abs(params_.Lq), EPS_L);
+    double J  = std::max(std::abs(params_.J), EPS_J);
+    double did = (vd - params_.Rs * id_ + params_.p * we_ * params_.Lq * iq_) / Ld;
+    double diq = (vq - params_.Rs * iq_ - params_.p * we_ * params_.Ld * id_ - params_.p * we_ * params_.lambda_m) / Lq;
     double Te = calc_torque(id_, iq_);
-    double dwe = (Te - Tl - params_.B * we_) / params_.J;
+    double dwe = (Te - Tl - params_.B * we_) / J;
     return {did, diq, dwe};
 }
 
@@ -70,14 +76,20 @@ std::array<double, 3> PMSMModel::state_equations(double vd, double vq, double Tl
 // PIController实现
 // ============================================================================
 
+PIController::PIController() : params_(Params{}) {}
 PIController::PIController(const Params& params) : params_(params) {}
 
 double PIController::update(double setpoint, double measurement, double dt) {
     double error = setpoint - measurement;
     integral_ += error * dt;
 
-    // Anti-Windup
-    integral_ = std::max(params_.out_min / params_.Ki, std::min(params_.out_max / params_.Ki, integral_));
+    // Anti-Windup (guard against Ki == 0)
+    constexpr double EPS_KI = 1e-15;
+    if (std::abs(params_.Ki) < EPS_KI) {
+        integral_ = 0.0;
+    } else {
+        integral_ = std::max(params_.out_min / params_.Ki, std::min(params_.out_max / params_.Ki, integral_));
+    }
 
     double output = params_.Kp * error + params_.Ki * integral_;
     output = std::max(params_.out_min, std::min(params_.out_max, output));
@@ -94,6 +106,9 @@ void PIController::reset() {
 // ============================================================================
 // FOCController实现
 // ============================================================================
+
+FOCController::FOCController()
+    : params_(Params{}), pi_d_(params_.current_d), pi_q_(params_.current_q), pi_speed_(params_.speed) {}
 
 FOCController::FOCController(const Params& params)
     : params_(params), pi_d_(params_.current_d), pi_q_(params_.current_q), pi_speed_(params_.speed) {}
@@ -125,7 +140,7 @@ void FOCController::set_state(const StateVector& state) {}
 
 std::array<double, 2> FOCController::clarke_transform(double ia, double ib, double ic) {
     double alpha = ia;
-    double beta = (ia + 2.0 * ib) / std::sqrt(3.0);
+    double beta = (ib - ic) / std::sqrt(3.0);
     return {alpha, beta};
 }
 
@@ -149,6 +164,11 @@ std::array<double, 2> FOCController::inv_park_transform(double vd, double vq, do
 }
 
 std::array<double, 3> FOCController::svpwm(double v_alpha, double v_beta, double v_dc) {
+    constexpr double EPS_V = 1e-12;
+    if (std::abs(v_dc) < EPS_V) {
+        return {0.5, 0.5, 0.5};
+    }
+
     // 简化SVPWM实现
     double v_ref = std::sqrt(v_alpha * v_alpha + v_beta * v_beta);
     double angle = std::atan2(v_beta, v_alpha);
@@ -169,6 +189,7 @@ std::array<double, 3> FOCController::svpwm(double v_alpha, double v_beta, double
 // BuckConverter实现
 // ============================================================================
 
+BuckConverter::BuckConverter() : params_(Params{}) {}
 BuckConverter::BuckConverter(const Params& params) : params_(params) {}
 
 ModelOutput BuckConverter::step(const std::vector<double>& inputs, double dt) {
@@ -176,13 +197,23 @@ ModelOutput BuckConverter::step(const std::vector<double>& inputs, double dt) {
 
     double vin = inputs[0], duty = inputs[1], R_load = inputs[2];
 
-    // 状态方程 (CCM)
-    double diL = (duty * vin - vout_ - iL_ * params_.R_L) / params_.L;
-    double dvout = (iL_ - vout_ / R_load) / params_.C;
+    // Guard against division by zero
+    constexpr double EPS_L = 1e-12;
+    constexpr double EPS_C = 1e-12;
+    constexpr double EPS_R = 1e-9;
+    double L = std::max(std::abs(params_.L), EPS_L);
+    double C = std::max(std::abs(params_.C), EPS_C);
+    double R = std::max(std::abs(R_load), EPS_R);
 
-    // 欧拉积分
+    // 状态方程 (CCM)
+    double diL = (duty * vin - vout_ - iL_ * params_.R_L) / L;
+    double dvout = (iL_ - vout_ / R) / C;
+
+    // 欧拉积分 + NaN guard
     iL_ += diL * dt;
     vout_ += dvout * dt;
+    if (!std::isfinite(iL_)) iL_ = 0.0;
+    if (!std::isfinite(vout_)) vout_ = 0.0;
 
     // 功率损耗
     double P_cond = iL_ * iL_ * params_.R_on * duty;
@@ -202,6 +233,7 @@ void BuckConverter::set_state(const StateVector& state) {
 // BoostConverter实现
 // ============================================================================
 
+BoostConverter::BoostConverter() : params_(Params{}) {}
 BoostConverter::BoostConverter(const Params& params) : params_(params) {}
 
 ModelOutput BoostConverter::step(const std::vector<double>& inputs, double dt) {
@@ -209,18 +241,28 @@ ModelOutput BoostConverter::step(const std::vector<double>& inputs, double dt) {
 
     double vin = inputs[0], duty = inputs[1], R_load = inputs[2];
 
-    // 状态方程 (CCM)
-    double diL = (vin - (1.0 - duty) * vout_ - iL_ * params_.R_L) / params_.L;
-    double dvout = ((1.0 - duty) * iL_ - vout_ / R_load) / params_.C;
+    // Guard against division by zero
+    constexpr double EPS_L = 1e-12;
+    constexpr double EPS_C = 1e-12;
+    constexpr double EPS_R = 1e-9;
+    double L = std::max(std::abs(params_.L), EPS_L);
+    double C = std::max(std::abs(params_.C), EPS_C);
+    double R = std::max(std::abs(R_load), EPS_R);
 
-    // 欧拉积分
+    // 状态方程 (CCM)
+    double diL = (vin - (1.0 - duty) * vout_ - iL_ * params_.R_L) / L;
+    double dvout = ((1.0 - duty) * iL_ - vout_ / R) / C;
+
+    // 欧拉积分 + NaN guard
     iL_ += diL * dt;
     vout_ += dvout * dt;
+    if (!std::isfinite(iL_)) iL_ = 0.0;
+    if (!std::isfinite(vout_)) vout_ = 0.0;
 
     // 功率损耗
-    double Ploss = iL_ * iL_ * params_.R_L + vout_ * vout_ / R_load * 0.01;
+    double Ploss = iL_ * iL_ * params_.R_L + vout_ * vout_ / R * 0.01;
 
-    return {{iL_, vout_}, {iL_, vout_, Ploss}, Ploss, vout_ * vout_ / R_load / (vin * iL_ + 1e-10)};
+    return {{iL_, vout_}, {iL_, vout_, Ploss}, Ploss, vout_ * vout_ / R / (vin * iL_ + 1e-10)};
 }
 
 void BoostConverter::reset() { iL_ = vout_ = 0.0; }
@@ -233,6 +275,7 @@ void BoostConverter::set_state(const StateVector& state) {
 // BatteryModel实现
 // ============================================================================
 
+BatteryModel::BatteryModel() : params_(Params{}) {}
 BatteryModel::BatteryModel(const Params& params) : params_(params) {}
 
 ModelOutput BatteryModel::step(const std::vector<double>& inputs, double dt) {

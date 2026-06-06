@@ -4,16 +4,18 @@ Provides interface for visualizing simulation results, comparing different
 runs, and exporting data.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
+import logging
 import numpy as np
-from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QGroupBox, QComboBox,
-    QDoubleSpinBox, QSpinBox, QCheckBox, QTextEdit,
+    QCheckBox,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QProgressBar, QSplitter, QMessageBox, QFileDialog,
+    QSplitter, QMessageBox, QFileDialog,
     QListWidget, QListWidgetItem
 )
 from PySide6.QtCore import Qt, Signal
@@ -86,7 +88,7 @@ class ResultsPanel(QWidget):
         
         # Data list
         self._data_list = QListWidget()
-        self._data_list.setSelectionMode(QListWidget.MultiSelection)
+        self._data_list.setSelectionMode(QListWidget.SingleSelection)
         self._data_list.itemSelectionChanged.connect(self._on_selection_changed)
         load_layout.addWidget(self._data_list)
         
@@ -184,7 +186,7 @@ class ResultsPanel(QWidget):
         
         # Right panel - Plot
         plot_widget = QWidget()
-        plot_layout = QVBoxLayout(plot_widget)
+        right_layout = QVBoxLayout(plot_widget)
         
         if MATPLOTLIB_AVAILABLE:
             self._figure = Figure(figsize=(10, 6))
@@ -194,16 +196,16 @@ class ResultsPanel(QWidget):
             self._ax.set_xlabel("X")
             self._ax.set_ylabel("Y")
             self._ax.grid(True)
-            plot_layout.addWidget(self._canvas)
+            right_layout.addWidget(self._canvas)
         else:
             self._placeholder = QLabel("Matplotlib not available for plotting")
             self._placeholder.setAlignment(Qt.AlignCenter)
-            plot_layout.addWidget(self._placeholder)
+            right_layout.addWidget(self._placeholder)
         
         # Data table
         self._data_table = QTableWidget()
         self._data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        plot_layout.addWidget(self._data_table)
+        right_layout.addWidget(self._data_table)
         
         splitter.addWidget(plot_widget)
         
@@ -264,13 +266,17 @@ class ResultsPanel(QWidget):
                     self._data[header] = []
                 
                 # Read data
+                skipped_rows = 0
                 for row in reader:
                     for i, value in enumerate(row):
                         if i < len(headers):
                             try:
                                 self._data[headers[i]].append(float(value))
-                            except ValueError:
-                                pass
+                            except (ValueError, TypeError):
+                                skipped_rows += 1
+                
+                if skipped_rows > 0:
+                    logger.warning("Skipped %d non-numeric values in CSV", skipped_rows)
                 
                 # Convert to numpy arrays
                 for header in headers:
@@ -354,10 +360,19 @@ class ResultsPanel(QWidget):
         if len(data) == 0:
             return
         
-        self._mean_label.setText(f"{np.mean(data):.6f}")
-        self._std_label.setText(f"{np.std(data):.6f}")
-        self._min_label.setText(f"{np.min(data):.6f}")
-        self._max_label.setText(f"{np.max(data):.6f}")
+        # Filter NaN/Inf for statistics
+        valid = data[np.isfinite(data)]
+        if len(valid) == 0:
+            self._mean_label.setText("nan")
+            self._std_label.setText("nan")
+            self._min_label.setText("nan")
+            self._max_label.setText("nan")
+            return
+        
+        self._mean_label.setText(f"{np.mean(valid):.6f}")
+        self._std_label.setText(f"{np.std(valid):.6f}")
+        self._min_label.setText(f"{np.min(valid):.6f}")
+        self._max_label.setText(f"{np.max(valid):.6f}")
     
     def _update_data_table(self):
         """Update data table."""
@@ -373,9 +388,14 @@ class ResultsPanel(QWidget):
         max_len = max(len(self._data[k]) for k in keys)
         
         # Set table size
-        self._data_table.setRowCount(min(max_len, 100))  # Limit to 100 rows
+        display_rows = min(max_len, 100)
+        self._data_table.setRowCount(display_rows)
         self._data_table.setColumnCount(len(keys))
         self._data_table.setHorizontalHeaderLabels(keys)
+
+        # Show truncation notice
+        if max_len > 100:
+            self._data_table.setToolTip(f"Showing first 100 of {max_len} rows")
         
         # Fill table
         for col, key in enumerate(keys):
@@ -389,7 +409,7 @@ class ResultsPanel(QWidget):
             return
         
         name = f"Dataset {len(self._comparison_data) + 1}"
-        self._comparison_data[name] = self._data.copy()
+        self._comparison_data[name] = {k: v.copy() if hasattr(v, 'copy') else v for k, v in self._data.items()}
         self._comparison_list.addItem(name)
         self._update_plot()
     

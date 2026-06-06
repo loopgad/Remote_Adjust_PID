@@ -8,8 +8,8 @@ Provides:
 
 import time
 import logging
+import threading
 from enum import Enum
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -38,25 +38,35 @@ class GlobalClock:
     """
 
     def __init__(self, mode: ClockMode = ClockMode.OFFLINE,
-                 rt_tolerance_ns: int = 1000000):
+                 rt_tolerance_ns: int = 1000000,
+                 dt_ns: int = 50000):
         """Initialize global clock.
 
         Args:
             mode: Clock operating mode
             rt_tolerance_ns: Real-time tolerance [ns] (default: 1ms)
+            dt_ns: Default time step [ns] (default: 50μs)
         """
         self.mode = mode
         self.rt_tolerance_ns = rt_tolerance_ns
+        self.dt_ns = dt_ns
 
         self.sim_time_ns: int = 0
         self.step_count: int = 0
         self._wall_start: float = 0.0
         self._diverged: bool = False
+        self._lock = threading.Lock()
 
     @property
     def sim_time_s(self) -> float:
         """Get simulation time in seconds."""
-        return ns_to_s(self.sim_time_ns)
+        with self._lock:
+            return ns_to_s(self.sim_time_ns)
+
+    @property
+    def dt_s(self) -> float:
+        """Get default time step in seconds."""
+        return ns_to_s(self.dt_ns)
 
     @property
     def wall_time_s(self) -> float:
@@ -68,7 +78,8 @@ class GlobalClock:
     @property
     def diverged(self) -> bool:
         """Check if clock has diverged."""
-        return self._diverged
+        with self._lock:
+            return self._diverged
 
     def start(self) -> None:
         """Start the clock."""
@@ -79,10 +90,13 @@ class GlobalClock:
         """Advance simulation time by step_ns.
 
         Args:
-            step_ns: Time step in nanoseconds
+            step_ns: Time step in nanoseconds (must be positive)
         """
-        self.sim_time_ns += step_ns
-        self.step_count += 1
+        if step_ns <= 0:
+            raise ValueError(f"step_ns must be positive, got {step_ns}")
+        with self._lock:
+            self.sim_time_ns += step_ns
+            self.step_count += 1
 
         # Real-time synchronization
         if self.mode == ClockMode.REALTIME:
@@ -107,15 +121,17 @@ class GlobalClock:
 
     def mark_diverged(self) -> None:
         """Mark clock as diverged."""
-        self._diverged = True
+        with self._lock:
+            self._diverged = True
         logger.error("Clock marked as diverged at t=%.6fs", self.sim_time_s)
 
     def reset(self) -> None:
         """Reset clock to initial state."""
-        self.sim_time_ns = 0
-        self.step_count = 0
-        self._wall_start = 0.0
-        self._diverged = False
+        with self._lock:
+            self.sim_time_ns = 0
+            self.step_count = 0
+            self._wall_start = 0.0
+            self._diverged = False
         logger.info("Clock reset")
 
     def get_timing_stats(self) -> dict:

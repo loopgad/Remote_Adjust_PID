@@ -16,7 +16,7 @@ from typing import Dict, List
 
 import pytest
 
-from param_id_gui.models.motor.pmsm_dq import PMSMdqModel, PMSMModel
+from param_id_gui.models.motor.pmsm_dq import PMSMdqModel
 from param_id_gui.models.power.power_models import BuckConverter, BoostConverter
 from param_id_gui.models.controller.foc import FOCController
 
@@ -86,7 +86,7 @@ class TestPMSMPerformance:
         dt = 50e-6  # 50μs
 
         def update():
-            pmsm_model.step(vd=0.0, vq=5.0, tl=0.0, dt=dt)
+            pmsm_model.step_dq(vd=0.0, vq=5.0, tl=0.0, dt=dt)
 
         result = benchmark_model_update(pmsm_model, update, n_calls=n_calls)
 
@@ -103,24 +103,6 @@ class TestPMSMPerformance:
         # Target: > 10,000 calls/sec
         assert result["calls_per_sec"] > 10000, (
             f"PMSM throughput too low: {result['calls_per_sec']:.0f} calls/sec"
-        )
-
-    @pytest.mark.slow
-    def test_pmsm_legacy_update_throughput(self):
-        """Benchmark legacy PMSMModel.update() calls per second."""
-        model = PMSMModel()
-        model.set_input(vd=0.0, vq=5.0, tl=0.0)
-        dt = 50e-6
-
-        def update():
-            model.update(dt=dt)
-
-        result = benchmark_model_update(model, update, n_calls=10000)
-
-        print(f"\n  PMSM Legacy update: {result['calls_per_sec']:,.0f} calls/sec")
-
-        assert result["calls_per_sec"] > 10000, (
-            f"PMSM legacy throughput too low: {result['calls_per_sec']:.0f}"
         )
 
 
@@ -251,7 +233,7 @@ def generate_model_report(output_path: Path) -> Dict:
     # PMSM
     pmsm = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, B=1e-3, Pp=4)
     pmsm_result = benchmark_model_update(
-        pmsm, lambda: pmsm.step(vd=0.0, vq=5.0, tl=0.0, dt=50e-6),
+        pmsm, lambda: pmsm.step_dq(vd=0.0, vq=5.0, tl=0.0, dt=50e-6),
         n_calls=n_calls, n_runs=n_runs
     )
 

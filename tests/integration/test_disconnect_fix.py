@@ -132,12 +132,6 @@ class TestDataBus:
         data_bus.publish_scalar("test/topic", 99.0, "V", module_id="test")
         assert 99.0 in received
     
-    def test_publish_vector(self, data_bus):
-        """Test publish_vector works."""
-        values = {"a": 1.0, "b": 2.0, "c": 3.0}
-        sigs = data_bus.publish_vector("test/vec", values, "V", module_id="test")
-        assert len(sigs) == 3
-        assert sigs["a"].value == 1.0
 
 
 class TestOrchestrator:
@@ -165,17 +159,6 @@ class TestOrchestrator:
             pass
         orchestrator.register_stepper("test", dummy_step)
         assert "test" in orchestrator._steppers
-    
-    def test_orchestrator_run_simple(self, orchestrator):
-        """Test run_simple executes steps."""
-        step_count = 0
-        def count_step():
-            nonlocal step_count
-            step_count += 1
-        
-        orchestrator.register_stepper("counter", count_step)
-        orchestrator.run_simple(count_step, step_ns=1000000, duration_s=0.001)
-        assert step_count > 0
 
 
 class TestModelRegistry:
@@ -193,8 +176,7 @@ class TestModelRegistry:
     
     def test_registry_register_and_get(self, registry):
         """Test register and get work."""
-        from param_id_gui.core.model_registry import ModelMetadata
-        from param_id_gui.core.types import ModelType, FidelityLevel
+        from param_id_gui.core.model_registry import ModelMetadata, Domain, FidelityLevel
         
         class DummyModel:
             pass
@@ -203,8 +185,8 @@ class TestModelRegistry:
         meta = ModelMetadata(
             model_id="test_model",
             model_name="Test Model",
-            domain=ModelType.MOTOR,
-            fidelity=FidelityLevel.L0_IDEAL,
+            domain=Domain.MOTOR,
+            fidelity=FidelityLevel.L0_STUB,
             version="1.0.0",
             sim_step_ns=1000
         )

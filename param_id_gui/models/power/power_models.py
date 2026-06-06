@@ -4,14 +4,8 @@ Security:
   - CWE-754: NaN/Inf guards on all model inputs and outputs
 """
 
-import math
-
-
-def _guard_num(value: float, fallback: float = 0.0) -> float:
-    """Guard against NaN/Inf."""
-    if math.isnan(value) or math.isinf(value):
-        return fallback
-    return value
+from typing import Optional, Dict
+from param_id_gui.core.numeric_utils import guard_numeric as _guard_num
 
 
 class IdealBattery:
@@ -26,20 +20,29 @@ class IdealBattery:
         self.v_nom = _guard_num(v_nom, 48.0)
         self.v = self.v_nom
 
-    def step(self, i_load: float = 0.0) -> float:
+    def step(self, inputs: Dict[str, float] = None, dt_ns: int = 50000) -> Dict[str, float]:
         """Get battery voltage.
 
         Args:
-            i_load: Load current [A] (unused for ideal battery)
+            inputs: Input dictionary (i_load unused for ideal battery)
+            dt_ns: Time step in nanoseconds
 
         Returns:
-            Battery voltage [V]
+            Current state dictionary
         """
-        return self.v
+        return self.get_state()
 
     def reset(self) -> None:
         """Reset battery state."""
         self.v = self.v_nom
+
+    def get_state(self) -> Dict[str, float]:
+        """Get current battery state."""
+        return {"voltage": self.v}
+
+    def get_default_inputs(self) -> Dict[str, float]:
+        """Get default inputs."""
+        return {"i_load": 0.0}
 
 
 class RintBattery:
@@ -56,23 +59,33 @@ class RintBattery:
         self.r_int = max(_guard_num(r_int, 0.05), 1e-9)
         self.v = self.v_oc
 
-    def step(self, i_load: float = 0.0) -> float:
+    def step(self, inputs: Dict[str, float] = None, dt_ns: int = 50000) -> Dict[str, float]:
         """Get battery voltage under load.
 
         Args:
-            i_load: Load current [A]
+            inputs: Input dictionary with optional 'i_load' key
+            dt_ns: Time step in nanoseconds
 
         Returns:
-            Battery voltage [V]
+            Current state dictionary
         """
+        i_load = (inputs or {}).get("i_load", 0.0)
         i_load = _guard_num(i_load, 0.0)
         self.v = max(0.0, self.v_oc - i_load * self.r_int)
         self.v = _guard_num(self.v, self.v_oc)
-        return self.v
+        return self.get_state()
 
     def reset(self) -> None:
         """Reset battery state."""
         self.v = self.v_oc
+
+    def get_state(self) -> Dict[str, float]:
+        """Get current battery state."""
+        return {"voltage": self.v}
+
+    def get_default_inputs(self) -> Dict[str, float]:
+        """Get default inputs."""
+        return {"i_load": 0.0}
 
 
 class AverageInverter:
@@ -81,265 +94,147 @@ class AverageInverter:
     Converts duty cycles and DC bus voltage to phase voltages.
     """
 
-    def __init__(self, v_bus: float = 48.0, dead_time_ns: float = 200.0):
+    def __init__(self, v_bus: float = 48.0):
         """Initialize average inverter model.
 
         Args:
             v_bus: DC bus voltage [V]
-            dead_time_ns: Dead time [ns]
         """
         self.v_bus = _guard_num(v_bus, 48.0)
-        self.dead_time_ns = _guard_num(dead_time_ns, 200.0)
+        self._last_va = 0.0
+        self._last_vb = 0.0
+        self._last_vc = 0.0
 
-    def step(self, duty_a: float, duty_b: float, duty_c: float,
-             v_bus: float = None, ia: float = 0.0, ib: float = 0.0,
-             ic: float = 0.0) -> tuple:
+    def step(self, inputs: Dict[str, float] = None, dt_ns: int = 50000) -> Dict[str, float]:
         """Compute three-phase output voltages with NaN/Inf guards.
 
         Args:
-            duty_a: Phase a duty cycle [0, 1]
-            duty_b: Phase b duty cycle [0, 1]
-            duty_c: Phase c duty cycle [0, 1]
-            v_bus: DC bus voltage [V] (optional, uses default if None)
-            ia: Phase a current [A] (unused in average model)
-            ib: Phase b current [A] (unused in average model)
-            ic: Phase c current [A] (unused in average model)
+            inputs: Input dictionary with 'duty_a', 'duty_b', 'duty_c', optional 'v_bus'
+            dt_ns: Time step in nanoseconds
 
         Returns:
-            Tuple of (va, vb, vc) phase voltages [V]
+            Current state dictionary
         """
-        # Guard duty cycles (already in [0,1] from svpwm, but be safe)
-        da = max(0.0, min(1.0, _guard_num(duty_a, 0.5)))
-        db = max(0.0, min(1.0, _guard_num(duty_b, 0.5)))
-        dc = max(0.0, min(1.0, _guard_num(duty_c, 0.5)))
+        inp = inputs or {}
+        da = max(0.0, min(1.0, _guard_num(inp.get("duty_a", 0.5), 0.5)))
+        db = max(0.0, min(1.0, _guard_num(inp.get("duty_b", 0.5), 0.5)))
+        dc = max(0.0, min(1.0, _guard_num(inp.get("duty_c", 0.5), 0.5)))
 
-        if v_bus is None:
-            v_bus = self.v_bus
-        else:
-            self.v_bus = max(0.0, _guard_num(v_bus, 48.0))
+        v_bus = max(0.0, _guard_num(inp.get("v_bus", self.v_bus), 48.0))
+        self.v_bus = v_bus
 
-        v_bus = max(0.0, _guard_num(v_bus, 48.0))
+        self._last_va = _guard_num(v_bus * (da - 0.5), 0.0)
+        self._last_vb = _guard_num(v_bus * (db - 0.5), 0.0)
+        self._last_vc = _guard_num(v_bus * (dc - 0.5), 0.0)
 
-        va = v_bus * (da - 0.5)
-        vb = v_bus * (db - 0.5)
-        vc = v_bus * (dc - 0.5)
-
-        return (_guard_num(va, 0.0), _guard_num(vb, 0.0), _guard_num(vc, 0.0))
+        return self.get_state()
 
     def reset(self) -> None:
         """Reset inverter state."""
-        pass  # No state to reset for average model
+        self._last_va = 0.0
+        self._last_vb = 0.0
+        self._last_vc = 0.0
+
+    def get_state(self) -> Dict[str, float]:
+        """Get current inverter state."""
+        return {
+            "v_bus": self.v_bus,
+            "va": self._last_va,
+            "vb": self._last_vb,
+            "vc": self._last_vc,
+        }
+
+    def get_default_inputs(self) -> Dict[str, float]:
+        """Get default inputs."""
+        return {"duty_a": 0.5, "duty_b": 0.5, "duty_c": 0.5, "v_bus": self.v_bus}
 
 
 # ── DC-DC Converter Models ────────────────────────────────────
 
-from dataclasses import dataclass as _dataclass
-from typing import Dict as _Dict, Any as _Any, Optional as _Optional
 
+class _DCDCConverterBase:
+    """Base class for DC-DC converter models (Buck/Boost).
 
-@_dataclass
-class BuckConverterParameters:
-    """Buck converter parameters."""
-    Vin: float = 12.0      # Input voltage (V)
-    L: float = 0.001       # Inductance (H)
-    C: float = 0.0001      # Capacitance (F)
-    R: float = 0.01        # ESR of capacitor (Ohm)
-    Rl: float = 0.05       # Inductor resistance (Ohm)
-    f_sw: float = 100000   # Switching frequency (Hz)
-
-
-@_dataclass
-class BoostConverterParameters:
-    """Boost converter parameters."""
-    Vin: float = 5.0       # Input voltage (V)
-    L: float = 0.001       # Inductance (H)
-    C: float = 0.0001      # Capacitance (F)
-    R: float = 0.01        # ESR of capacitor (Ohm)
-    Rl: float = 0.05       # Inductor resistance (Ohm)
-    f_sw: float = 100000   # Switching frequency (Hz)
-
-
-class BuckConverter:
-    """Buck converter model for DC-DC power conversion.
-
-    This class implements the average model of a Buck converter
-    for simulation purposes.
+    Subclasses implement `_compute_derivatives` with topology-specific equations.
     """
 
-    def __init__(self, params: _Optional[BuckConverterParameters] = None):
-        """Initialize Buck converter model.
-
-        Args:
-            params: Buck converter parameters (uses defaults if None)
-        """
-        self.params = params or BuckConverterParameters()
-        self.state = {
-            'iL': 0.0,     # Inductor current (A)
-            'vC': 0.0,     # Capacitor voltage (V)
-        }
-        self._duty_cycle = 0.5  # Duty cycle [0, 1]
-        self._load_current = 0.0  # Load current (A)
+    def __init__(self, params):
+        self.params = params
+        self.state = {'iL': 0.0, 'vC': 0.0}
+        self._duty_cycle = 0.5
+        self._load_current = 0.0
 
     def set_input(self, duty_cycle: float, load_current: float = 0.0):
-        """Set converter inputs.
-
-        Args:
-            duty_cycle: Duty cycle [0, 1]
-            load_current: Load current (A)
-        """
         self._duty_cycle = max(0.0, min(1.0, duty_cycle))
         self._load_current = load_current
 
-    def get_state(self) -> _Dict[str, float]:
-        """Get current model state.
-
-        Returns:
-            Dictionary of state variables
-        """
+    def get_state(self) -> Dict[str, float]:
         return self.state.copy()
 
-    def update(self, dt: float) -> _Dict[str, float]:
-        """Update model state for one time step.
+    def get_default_inputs(self) -> Dict[str, float]:
+        """Get default inputs for DC-DC converter."""
+        return {"duty_cycle": 0.5, "load_current": 0.0}
 
-        Args:
-            dt: Time step (s)
+    def _compute_derivatives(self, iL: float, vC: float, d: float,
+                             i_load: float, Vin: float, L: float,
+                             C: float, R_load: float) -> tuple:
+        raise NotImplementedError
 
-        Returns:
-            Updated state dictionary
-        """
-        # Extract parameters
+    def update(self, dt: float) -> Dict[str, float]:
         Vin = self.params.Vin
         L = self.params.L
         C = self.params.C
-        R = self.params.R
-        Rl = self.params.Rl
+        R_load = self.params.R_load
 
-        # Extract state
         iL = self.state['iL']
         vC = self.state['vC']
-
-        # Extract input
         d = self._duty_cycle
         i_load = self._load_current
 
-        # Average model equations
-        # L * diL/dt = d*Vin - vC - Rl*iL
-        # C * dvC/dt = iL - i_load - vC/R
-        diL = (d * Vin - vC - Rl * iL) / L
-        dvC = (iL - i_load - vC / R) / C
+        diL, dvC = self._compute_derivatives(iL, vC, d, i_load, Vin, L, C, R_load)
 
-        # Update state using Euler integration
-        self.state['iL'] += diL * dt
-        self.state['vC'] += dvC * dt
+        self.state['iL'] = _guard_num(self.state['iL'] + diL * dt, 0.0)
+        self.state['vC'] = _guard_num(self.state['vC'] + dvC * dt, 0.0)
 
         return self.get_state()
 
-    def reset(self):
-        """Reset model state to initial values."""
-        self.state = {
-            'iL': 0.0,
-            'vC': 0.0,
-        }
+    def reset(self) -> None:
+        self.state = {'iL': 0.0, 'vC': 0.0}
         self._duty_cycle = 0.5
         self._load_current = 0.0
 
     def get_output_voltage(self) -> float:
-        """Get output voltage.
-
-        Returns:
-            Output voltage (V)
-        """
         return self.state['vC']
 
+    def step(self, inputs: dict, dt_ns: int = 50000) -> dict:
+        duty = inputs.get("duty_cycle", 0.5)
+        load = inputs.get("load_current", 0.0)
+        self.set_input(duty, load)
+        dt = dt_ns / 1e9
+        return self.update(dt)
 
-class BoostConverter:
-    """Boost converter model for DC-DC power conversion.
 
-    This class implements the average model of a Boost converter
-    for simulation purposes.
-    """
+class BuckConverter(_DCDCConverterBase):
+    """Buck converter model for DC-DC power conversion."""
 
-    def __init__(self, params: _Optional[BoostConverterParameters] = None):
-        """Initialize Boost converter model.
+    def __init__(self, params: Optional['BuckConverterParams'] = None):
+        from param_id_gui.core.types import BuckConverterParams
+        super().__init__(params or BuckConverterParams())
 
-        Args:
-            params: Boost converter parameters (uses defaults if None)
-        """
-        self.params = params or BoostConverterParameters()
-        self.state = {
-            'iL': 0.0,     # Inductor current (A)
-            'vC': 0.0,     # Capacitor voltage (V)
-        }
-        self._duty_cycle = 0.5  # Duty cycle [0, 1]
-        self._load_current = 0.0  # Load current (A)
+    def _compute_derivatives(self, iL, vC, d, i_load, Vin, L, C, R_load):
+        diL = (d * Vin - vC - R_load * iL) / L
+        dvC = (iL - i_load - vC / R_load) / C
+        return diL, dvC
 
-    def set_input(self, duty_cycle: float, load_current: float = 0.0):
-        """Set converter inputs.
 
-        Args:
-            duty_cycle: Duty cycle [0, 1]
-            load_current: Load current (A)
-        """
-        self._duty_cycle = max(0.0, min(1.0, duty_cycle))
-        self._load_current = load_current
+class BoostConverter(_DCDCConverterBase):
+    """Boost converter model for DC-DC power conversion."""
 
-    def get_state(self) -> _Dict[str, float]:
-        """Get current model state.
+    def __init__(self, params: Optional['BoostConverterParams'] = None):
+        from param_id_gui.core.types import BoostConverterParams
+        super().__init__(params or BoostConverterParams())
 
-        Returns:
-            Dictionary of state variables
-        """
-        return self.state.copy()
-
-    def update(self, dt: float) -> _Dict[str, float]:
-        """Update model state for one time step.
-
-        Args:
-            dt: Time step (s)
-
-        Returns:
-            Updated state dictionary
-        """
-        # Extract parameters
-        Vin = self.params.Vin
-        L = self.params.L
-        C = self.params.C
-        R = self.params.R
-        Rl = self.params.Rl
-
-        # Extract state
-        iL = self.state['iL']
-        vC = self.state['vC']
-
-        # Extract input
-        d = self._duty_cycle
-        i_load = self._load_current
-
-        # Average model equations
-        # L * diL/dt = Vin - (1-d)*vC - Rl*iL
-        # C * dvC/dt = (1-d)*iL - i_load - vC/R
-        diL = (Vin - (1 - d) * vC - Rl * iL) / L
-        dvC = ((1 - d) * iL - i_load - vC / R) / C
-
-        # Update state using Euler integration
-        self.state['iL'] += diL * dt
-        self.state['vC'] += dvC * dt
-
-        return self.get_state()
-
-    def reset(self):
-        """Reset model state to initial values."""
-        self.state = {
-            'iL': 0.0,
-            'vC': 0.0,
-        }
-        self._duty_cycle = 0.5
-        self._load_current = 0.0
-
-    def get_output_voltage(self) -> float:
-        """Get output voltage.
-
-        Returns:
-            Output voltage (V)
-        """
-        return self.state['vC']
+    def _compute_derivatives(self, iL, vC, d, i_load, Vin, L, C, R_load):
+        diL = (Vin - (1 - d) * vC - R_load * iL) / L
+        dvC = ((1 - d) * iL - i_load - vC / R_load) / C
+        return diL, dvC

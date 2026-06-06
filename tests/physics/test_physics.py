@@ -8,7 +8,7 @@ import math
 import numpy as np
 import pytest
 
-from param_id_gui.models.motor.pmsm_dq import PMSMdqModel, PMSMModel, PMSMParameters
+from param_id_gui.models.motor.pmsm_dq import PMSMdqModel
 from param_id_gui.models.controller.foc import FOCController, PIController, SpeedController
 from param_id_gui.models.power.power_models import (
     BuckConverter, BoostConverter, IdealBattery, RintBattery, AverageInverter,
@@ -34,7 +34,7 @@ class TestPMSMPhysics:
         """With zero voltage, currents should remain zero."""
         model = _pmsm_default()
         for _ in range(1000):
-            model.step(0.0, 0.0, dt=50e-6)
+            model.step_dq(0.0, 0.0, dt=50e-6)
         assert abs(model.id) < 1e-6
         assert abs(model.iq) < 1e-6
 
@@ -42,7 +42,7 @@ class TestPMSMPhysics:
         """DC voltage should produce growing current (RL circuit)."""
         model = _pmsm_default()
         # Apply vd voltage, expect id current to rise
-        model.step(10.0, 0.0, dt=1e-5)
+        model.step_dq(10.0, 0.0, dt=1e-5)
         # After one step, id should be positive (V/R * (1 - exp(-t/tau)))
         assert model.id > 0.0
 
@@ -52,7 +52,7 @@ class TestPMSMPhysics:
         vd = 5.0
         # Run long enough for RL circuit to settle
         for _ in range(50000):
-            model.step(vd, 0.0, dt=1e-6)
+            model.step_dq(vd, 0.0, dt=1e-6)
 
         # Steady state: id ≈ Vd/Rs
         expected_id = vd / model.Rs
@@ -84,7 +84,7 @@ class TestPMSMPhysics:
         )
         # Apply vq to generate torque
         for _ in range(10000):
-            model.step(0.0, 10.0, dt=1e-6)
+            model.step_dq(0.0, 10.0, dt=1e-6)
 
         # Speed should increase (positive torque from iq)
         assert model.omega_m > 0
@@ -96,7 +96,7 @@ class TestPMSMPhysics:
 
         # Run with load torque
         for _ in range(5000):
-            model.step(0.0, 0.0, tl=0.01, dt=1e-6)
+            model.step_dq(0.0, 0.0, tl=0.01, dt=1e-6)
 
         # Speed should decrease due to friction + load
         assert model.omega_m < 100.0
@@ -105,7 +105,7 @@ class TestPMSMPhysics:
         """Reset should return all states to zero."""
         model = _pmsm_default()
         for _ in range(1000):
-            model.step(10.0, 10.0, dt=1e-5)
+            model.step_dq(10.0, 10.0, dt=1e-5)
         model.reset()
 
         assert model.id == 0.0
@@ -139,14 +139,14 @@ class TestPMSMPhysics:
     def test_nan_guard_on_inputs(self):
         """Model should handle NaN inputs gracefully."""
         model = _pmsm_default()
-        model.step(float("nan"), 5.0, dt=1e-5)
+        model.step_dq(float("nan"), 5.0, dt=1e-5)
         state = model.get_state()
         assert all(math.isfinite(v) for v in state.values())
 
     def test_inf_guard_on_inputs(self):
         """Model should handle Inf inputs gracefully."""
         model = _pmsm_default()
-        model.step(float("inf"), float("-inf"), dt=1e-5)
+        model.step_dq(float("inf"), float("-inf"), dt=1e-5)
         state = model.get_state()
         assert all(math.isfinite(v) for v in state.values())
 
@@ -245,29 +245,29 @@ class TestDCDCPhysics:
         """Ideal battery should maintain constant voltage."""
         bat = IdealBattery(v_nom=48.0)
         for i in range(100):
-            v = bat.step(i_load=float(i))
-            assert abs(v - 48.0) < 1e-10
+            state = bat.step({"i_load": float(i)})
+            assert abs(state["voltage"] - 48.0) < 1e-10
 
     def test_rint_battery_voltage_drops_with_current(self):
         """Rint battery voltage should drop with load current."""
         bat = RintBattery(v_oc=48.0, r_int=0.1)
-        v_no_load = bat.step(i_load=0.0)
-        v_full_load = bat.step(i_load=10.0)
-        assert v_no_load > v_full_load
-        assert abs(v_full_load - (48.0 - 10.0 * 0.1)) < 1e-6
+        state_no_load = bat.step({"i_load": 0.0})
+        state_full_load = bat.step({"i_load": 10.0})
+        assert state_no_load["voltage"] > state_full_load["voltage"]
+        assert abs(state_full_load["voltage"] - (48.0 - 10.0 * 0.1)) < 1e-6
 
     def test_average_inverter_produces_voltage(self):
         """Average inverter should produce voltages from duty cycles."""
         inv = AverageInverter(v_bus=48.0)
-        va, vb, vc = inv.step(0.5, 0.5, 0.5)
+        state = inv.step({"duty_a": 0.5, "duty_b": 0.5, "duty_c": 0.5})
         # At 50% duty, output should be ~0V (centered)
-        assert abs(va) < 1.0
-        assert abs(vb) < 1.0
-        assert abs(vc) < 1.0
+        assert abs(state["va"]) < 1.0
+        assert abs(state["vb"]) < 1.0
+        assert abs(state["vc"]) < 1.0
 
     def test_average_inverter_full_duty(self):
         """At 100% duty, output should be +Vbus/2."""
         inv = AverageInverter(v_bus=48.0)
-        va, vb, vc = inv.step(1.0, 1.0, 1.0)
+        state = inv.step({"duty_a": 1.0, "duty_b": 1.0, "duty_c": 1.0})
         expected = 48.0 * 0.5  # Vbus * (1.0 - 0.5)
-        assert abs(va - expected) < 1e-6
+        assert abs(state["va"] - expected) < 1e-6

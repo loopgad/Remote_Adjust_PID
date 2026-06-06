@@ -85,7 +85,7 @@ class TestDynamicModelLoading:
 
         # Dynamic invocation
         retrieved = registry.get("mdl://motor/pmsm/v1")
-        retrieved.step(10.0, 5.0, dt=1e-5)
+        retrieved.step_dq(10.0, 5.0, dt=1e-5)
         state = retrieved.get_state()
 
         assert "id" in state
@@ -106,7 +106,7 @@ class TestDynamicModelLoading:
 
         # Run, then reset
         retrieved = registry.get("mdl://motor/pmsm/v1")
-        retrieved.step(10.0, 5.0, dt=1e-5)
+        retrieved.step_dq(10.0, 5.0, dt=1e-5)
         retrieved.reset()
 
         state = retrieved.get_state()

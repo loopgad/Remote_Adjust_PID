@@ -1,4 +1,4 @@
-"""PMSM dq-axis model and FOC controller unit tests (Task 8).
+"""PMSM dq-axis model and FOC controller unit tests.
 
 Covers:
   - PMSMdqModel: parameter validation, NaN/Inf guards, dq dynamics, torque
@@ -6,7 +6,6 @@ Covers:
   - PIController: proportional, integral, anti-windup
   - FOCController: full Clarke→Park→PI→invPark→SVPWM pipeline
   - SpeedController: outer-loop speed PI
-  - Legacy wrappers: PMSMModel, FOCControllerLegacy
   - NaN/Inf security guards on every entry point
 """
 
@@ -15,13 +14,12 @@ import pytest
 import numpy as np
 
 from param_id_gui.models.motor.pmsm_dq import (
-    PMSMdqModel, PMSMModel, PMSMParameters,
+    PMSMdqModel,
     _guard_numeric, _MOTOR_EPS_L, _MOTOR_EPS_J,
 )
 from param_id_gui.models.controller.foc import (
     clarke_transform, park_transform, inverse_park, svpwm,
     PIController, FOCController, SpeedController,
-    FOCParameters, FOCControllerLegacy,
     _PWM_EPS_V,
 )
 
@@ -127,57 +125,57 @@ class TestPMSMdqModelStep:
         """无输入电压时，电流应保持为零。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
         for _ in range(100):
-            m.step(0, 0)
+            m.step_dq(0, 0)
         assert abs(m.id) < 1e-6
         assert abs(m.iq) < 1e-6
 
     def test_step_d_axis_voltage_builds_current(self):
         """正 vd 应建立正 id（忽略反电动势初始为零）。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
-        m.step(vd=10.0, vq=0.0, dt=1e-5)
+        m.step_dq(vd=10.0, vq=0.0, dt=1e-5)
         # did = (vd - Rs*id + we*Lq*iq) / Ld = (10 - 0 + 0) / 5e-4 = 20000
         # id = 20000 * 1e-5 = 0.2 A
-        assert m.id > 0, "d-axis current should be positive with positive vd"
+        assert 0 < m.id < 100, "d-axis current should be in reasonable range"
 
     def test_step_q_axis_voltage_builds_current(self):
         """正 vq 应建立正 iq（初始 theta=0）。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
-        m.step(vd=0.0, vq=10.0, dt=1e-5)
+        m.step_dq(vd=0.0, vq=10.0, dt=1e-5)
         # diq = (vq - Rs*iq - we*(Ld*id + flux_pm)) / Lq
         # = (10 - 0 - 0*(0 + 0.03)) / 1e-3 = 10000
         # iq = 10000 * 1e-5 = 0.1 A
-        assert m.iq > 0, "q-axis current should be positive with positive vq"
+        assert 0 < m.iq < 100, "q-axis current should be in reasonable range"
 
     def test_step_torque_generation(self):
         """施加 vq 后应产生电磁转矩。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
         for _ in range(50):
-            m.step(vd=0, vq=20, dt=1e-5)
-        assert m.torque > 0, "Torque should be positive with positive iq"
+            m.step_dq(vd=0, vq=20, dt=1e-5)
+        assert 0 < m.torque < 10, "Torque should be in reasonable range"
 
     def test_step_speed_builds_up(self):
         """持续正转矩应使转速增加。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4, B=0)
         for _ in range(500):
-            m.step(vd=0, vq=30, dt=1e-5)
-        assert m.omega_m > 0, "Speed should increase with positive torque"
+            m.step_dq(vd=0, vq=30, dt=1e-5)
+        assert 0 < m.omega_m < 1000, "Speed should increase with positive torque"
 
     def test_step_load_torque_decelerates(self):
         """负载转矩应减速。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4, B=0)
         # 先加速
         for _ in range(500):
-            m.step(vd=0, vq=30, dt=1e-5)
+            m.step_dq(vd=0, vq=30, dt=1e-5)
         speed_before = m.omega_m
         # 施加负载
         for _ in range(200):
-            m.step(vd=0, vq=0, tl=0.5, dt=1e-5)
+            m.step_dq(vd=0, vq=0, tl=0.5, dt=1e-5)
         assert m.omega_m < speed_before, "Speed should decrease with load torque"
 
     def test_step_nan_input_guard(self):
         """NaN 输入应被 guard 处理，不产生 NaN 状态。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
-        m.step(float('nan'), float('nan'), float('nan'))
+        m.step_dq(float('nan'), float('nan'), float('nan'))
         assert not math.isnan(m.id)
         assert not math.isnan(m.iq)
         assert not math.isnan(m.omega_m)
@@ -185,7 +183,7 @@ class TestPMSMdqModelStep:
     def test_step_inf_input_guard(self):
         """Inf 输入应被 guard 处理。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
-        m.step(float('inf'), float('inf'), float('inf'))
+        m.step_dq(float('inf'), float('inf'), float('inf'))
         assert not math.isinf(m.id)
         assert not math.isinf(m.iq)
         assert not math.isinf(m.omega_m)
@@ -193,25 +191,25 @@ class TestPMSMdqModelStep:
     def test_step_custom_dt(self):
         """自定义 dt 应被正确使用。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
-        m.step(vd=10, vq=0, dt=1e-4)
+        m.step_dq(vd=10, vq=0, dt=1e-4)
         id1 = m.id
         m.reset()
-        m.step(vd=10, vq=0, dt=1e-3)
+        m.step_dq(vd=10, vq=0, dt=1e-3)
         id2 = m.id
         assert id2 > id1, "Larger dt should produce larger current change"
 
     def test_step_dt_floor(self):
         """dt 不应低于 1e-12。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
-        m.step(vd=10, vq=0, dt=0)  # dt=0 → floor to 1e-12
+        m.step_dq(vd=10, vq=0, dt=0)  # dt=0 → floor to 1e-12
         assert not math.isnan(m.id)
 
     def test_theta_wrapping(self):
         """theta_e 应在 [0, 2π) 范围内。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4, B=0)
         for _ in range(5000):
-            m.step(vd=0, vq=50, dt=1e-4)
-        assert 0 <= m.theta_e < 2 * math.pi + 0.01
+            m.step_dq(vd=0, vq=50, dt=1e-4)
+        assert 0 <= m.theta_e < 2 * math.pi
 
 
 class TestPMSMdqModelABC:
@@ -238,7 +236,7 @@ class TestPMSMdqModelABC:
         """三相电压输入应产生电流。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
         m.step_abc(va=10, vb=-5, vc=-5, dt=1e-5)
-        assert abs(m.id) > 1e-6 or abs(m.iq) > 1e-6
+        assert abs(m.id) > 1e-4, f"id should be significant, got {m.id}"
 
     def test_step_abc_nan_guard(self):
         """NaN 三相应被 guard 处理。"""
@@ -255,7 +253,7 @@ class TestPMSMdqModelReset:
         """reset() 应清零所有状态。"""
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
         for _ in range(100):
-            m.step(vd=10, vq=20, dt=1e-5)
+            m.step_dq(vd=10, vq=20, dt=1e-5)
         m.reset()
         s = m.get_state()
         for key in ('id', 'iq', 'omega_m', 'theta_e', 'torque', 'ia', 'ib', 'ic'):
@@ -266,7 +264,7 @@ class TestPMSMdqModelReset:
         m = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4)
         s = m.get_state()
         expected_keys = {'id', 'iq', 'omega_m', 'theta_e', 'torque',
-                         'ia', 'ib', 'ic', 'omega_e'}
+                         'ia', 'ib', 'ic', 'omega_e', 'speed'}
         assert set(s.keys()) == expected_keys
 
 
@@ -482,7 +480,7 @@ class TestPIController:
         for _ in range(1000):
             pi.update(100.0, 0.0)
         # 积分不应无限增长
-        assert abs(pi.integral) < 1e6, "Anti-windup should prevent integral blowup"
+        assert abs(pi.integral) < 50, f"Integral {pi.integral} not well-bounded by anti-windup"
 
     def test_reset(self):
         """reset() 应清零控制器状态。"""
@@ -639,109 +637,7 @@ class TestSpeedController:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  6. Legacy Wrapper Tests
-# ═══════════════════════════════════════════════════════════════
-
-class TestLegacyPMSMModel:
-    """PMSMModel 兼容层。"""
-
-    def test_default_params(self):
-        m = PMSMModel()
-        assert m.params.Rs == 0.5
-        assert m.params.Ld == 0.005
-
-    def test_update(self):
-        m = PMSMModel()
-        m.set_input(vd=10, vq=0, tl=0)
-        state = m.update(dt=1e-5)
-        assert 'id' in state
-        assert 'iq' in state
-
-    def test_reset(self):
-        m = PMSMModel()
-        m.set_input(vd=10, vq=0)
-        m.update(dt=1e-5)
-        m.reset()
-        state = m.get_state()
-        assert state['id'] == 0.0
-        assert state['iq'] == 0.0
-
-    def test_get_torque(self):
-        m = PMSMModel()
-        m.set_input(vd=0, vq=10)
-        m.update(dt=1e-5)
-        torque = m.get_torque()
-        assert isinstance(torque, float)
-
-
-class TestLegacyFOCController:
-    """FOCControllerLegacy 兼容层。"""
-
-    def test_default_params(self):
-        foc = FOCControllerLegacy()
-        assert foc.params.Kp_d == 10.0
-
-    def test_clarke_transform(self):
-        foc = FOCControllerLegacy()
-        i_alpha, i_beta = foc.clarke_transform(1.0, -0.5, -0.5)
-        assert abs(i_alpha - 1.0) < 1e-10
-
-    def test_park_transform(self):
-        foc = FOCControllerLegacy()
-        id_val, iq_val = foc.park_transform(1.0, 0.0, 0.0)
-        assert abs(id_val - 1.0) < 1e-10
-
-    def test_inverse_park_transform(self):
-        foc = FOCControllerLegacy()
-        v_alpha, v_beta = foc.inverse_park_transform(10.0, 0.0, 0.0)
-        assert abs(v_alpha - 10.0) < 1e-10
-
-    def test_set_mode(self):
-        foc = FOCControllerLegacy()
-        foc.set_mode("speed")
-        assert foc._mode == "speed"
-        with pytest.raises(ValueError):
-            foc.set_mode("invalid")
-
-    def test_set_reference(self):
-        foc = FOCControllerLegacy()
-        foc.set_reference(id_ref=5.0, iq_ref=10.0, speed_ref=100.0)
-        assert foc._id_ref == 5.0
-        assert foc._iq_ref == 10.0
-        assert foc._speed_ref == 100.0
-
-    def test_update_torque_mode(self):
-        foc = FOCControllerLegacy()
-        foc.set_reference(iq_ref=5.0)
-        vd, vq = foc.update(id_meas=0, iq_meas=0, speed_meas=0, theta=0, dt=1e-3)
-        assert isinstance(vd, float)
-        assert isinstance(vq, float)
-
-    def test_update_speed_mode(self):
-        foc = FOCControllerLegacy()
-        foc.set_mode("speed")
-        foc.set_reference(speed_ref=100.0)
-        vd, vq = foc.update(id_meas=0, iq_meas=0, speed_meas=0, theta=0, dt=1e-3)
-        assert isinstance(vd, float)
-        assert isinstance(vq, float)
-
-    def test_reset(self):
-        foc = FOCControllerLegacy()
-        foc.update(id_meas=0, iq_meas=0, speed_meas=0, theta=0, dt=1e-3)
-        foc.reset()
-        state = foc.get_state()
-        assert state['integral_d'] == 0.0
-        assert state['integral_q'] == 0.0
-
-    def test_get_state(self):
-        foc = FOCControllerLegacy()
-        state = foc.get_state()
-        assert 'mode' in state
-        assert 'integral_d' in state
-
-
-# ═══════════════════════════════════════════════════════════════
-#  7. Integration: PMSM + FOC Closed-Loop
+#  6. Integration: PMSM + FOC Closed-Loop
 # ═══════════════════════════════════════════════════════════════
 
 class TestPMSMFOCIntegration:
@@ -787,11 +683,11 @@ class TestPMSMFOCIntegration:
         """开环仿真：施加恒定电压后系统不应发散。"""
         motor = PMSMdqModel(Rs=0.5, Ld=5e-4, Lq=1e-3, flux_pm=0.03, J=1e-4, Pp=4)
         for _ in range(10000):
-            motor.step(vd=0, vq=10, dt=50e-6)
+            motor.step_dq(vd=0, vq=10, dt=50e-6)
 
         # 系统不应发散
-        assert abs(motor.iq) < 1000, "iq should not diverge"
-        assert abs(motor.omega_m) < 10000, "speed should not diverge"
+        assert abs(motor.iq) < 100, "iq should not diverge"
+        assert abs(motor.omega_m) < 1000, "speed should not diverge"
         assert not math.isnan(motor.iq)
         assert not math.isnan(motor.omega_m)
         assert not math.isnan(motor.theta_e)
@@ -805,7 +701,7 @@ class TestPMSMFOCIntegration:
         dt = 50e-6
         for _ in range(5000):
             vd, vq = 0.0, 20.0
-            motor.step(vd, vq, dt=dt)
+            motor.step_dq(vd, vq, dt=dt)
             # 输入功率 P = vd*id + vq*iq
             p_in = vd * motor.id + vq * motor.iq
             total_energy_in += p_in * dt

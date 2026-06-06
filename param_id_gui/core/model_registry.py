@@ -6,12 +6,14 @@ validation status.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Type
+import logging
+from typing import Any, Dict, List
+
+logger = logging.getLogger(__name__)
 
 
-class FidelityLevel(Enum):
+class FidelityLevel(int, Enum):
     """Model fidelity levels."""
     L0_STUB = 0          # stub — I/O only
     L1_EMPIRICAL = 1     # empirical — curves / lookup tables
@@ -20,7 +22,7 @@ class FidelityLevel(Enum):
     L4_HIGH_FIDELITY = 4 # high fidelity — FEM, CFD, full SPICE
 
 
-class Domain(Enum):
+class Domain(str, Enum):
     """Model domains."""
     POWER = "power"
     MOTOR = "motor"
@@ -43,6 +45,10 @@ class Port:
     range_min: float = -float("inf")
     range_max: float = float("inf")
     description: str = ""
+
+    def __post_init__(self) -> None:
+        if self.range_min > self.range_max:
+            raise ValueError(f"range_min ({self.range_min}) > range_max ({self.range_max})")
 
 
 @dataclass
@@ -96,7 +102,7 @@ class ModelRegistry:
         """Register a model with metadata.
 
         Args:
-            model: Model instance
+            model: Model instance (should have step/reset/get_state methods)
             metadata: Model metadata
 
         Raises:
@@ -105,6 +111,9 @@ class ModelRegistry:
         mid = metadata.model_id
         if mid in self._models:
             raise ValueError(f"Model {mid} already registered")
+        missing = [m for m in ("step", "reset", "get_state") if not hasattr(model, m)]
+        if missing:
+            logger.warning("Model %s missing methods: %s", mid, ", ".join(missing))
         self._models[mid] = model
         self._metadata[mid] = metadata
 
@@ -208,7 +217,7 @@ class ModelRegistry:
         Args:
             model_id: Model identifier
         """
-        if model_id in self._models:
-            del self._models[model_id]
-        if model_id in self._metadata:
-            del self._metadata[model_id]
+        if model_id not in self._models and model_id not in self._metadata:
+            logger.warning("Unregister called for unknown model_id '%s'", model_id)
+        self._models.pop(model_id, None)
+        self._metadata.pop(model_id, None)

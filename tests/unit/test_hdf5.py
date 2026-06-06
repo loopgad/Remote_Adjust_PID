@@ -100,7 +100,7 @@ class TestHDF5Handler:
     def test_record_simulation_data(self, tmp_path):
         """Test recording simulation data."""
         filename = str(tmp_path / "test.h5")
-        with HDF5Handler(filename) as handler:
+        with HDF5Handler(filename, buffer_size=1) as handler:
             handler.record_simulation_data(0.0, {"voltage": 12.0, "current": 1.0})
             handler.record_simulation_data(0.1, {"voltage": 12.5, "current": 1.1})
             
@@ -115,7 +115,7 @@ class TestHDF5Handler:
     def test_load_simulation_data(self, tmp_path):
         """Test loading simulation data."""
         filename = str(tmp_path / "test.h5")
-        with HDF5Handler(filename) as handler:
+        with HDF5Handler(filename, buffer_size=1) as handler:
             handler.record_simulation_data(0.0, {"x": 1.0})
             handler.record_simulation_data(0.1, {"x": 2.0})
             handler.record_simulation_data(0.2, {"x": 3.0})
@@ -123,6 +123,106 @@ class TestHDF5Handler:
             data = handler.load_simulation_data()
             assert len(data["time"]) == 3
             assert len(data["x"]) == 3
+
+    def test_buffer_init(self, tmp_path):
+        """Test buffer initialization with default and custom sizes."""
+        filename = str(tmp_path / "test.h5")
+        handler = HDF5Handler(filename)
+        assert handler._buffer == {}
+        assert handler._buffer_size == 1000
+        assert handler._buffer_count == 0
+
+        handler2 = HDF5Handler(filename, buffer_size=500)
+        assert handler2._buffer_size == 500
+
+    def test_flush_empty_buffer(self, tmp_path):
+        """Test flush with empty buffer does nothing."""
+        filename = str(tmp_path / "test.h5")
+        with HDF5Handler(filename) as handler:
+            handler.flush()  # Should not raise
+            assert handler._buffer == {}
+            assert handler._buffer_count == 0
+
+    def test_flush_writes_buffer(self, tmp_path):
+        """Test flush writes buffered data to HDF5."""
+        filename = str(tmp_path / "test.h5")
+        with HDF5Handler(filename) as handler:
+            # Buffer data without auto-flush (buffer_size=1000)
+            handler.record_simulation_data(0.0, {"voltage": 12.0})
+            handler.record_simulation_data(0.1, {"voltage": 12.5})
+            assert handler._buffer_count == 2
+
+            # Data should not be in file yet
+            data = handler.load_simulation_data()
+            assert len(data) == 0  # Empty - nothing written to HDF5 yet
+
+            # Flush
+            handler.flush()
+            assert handler._buffer_count == 0
+            assert handler._buffer == {}
+
+            # Now data should be in file
+            data = handler.load_simulation_data()
+            assert "time" in data
+            assert len(data["time"]) == 2
+
+    def test_auto_flush_on_buffer_full(self, tmp_path):
+        """Test auto-flush when buffer reaches threshold."""
+        filename = str(tmp_path / "test.h5")
+        with HDF5Handler(filename, buffer_size=3) as handler:
+            handler.record_simulation_data(0.0, {"x": 1.0})
+            handler.record_simulation_data(0.1, {"x": 2.0})
+            assert handler._buffer_count == 2  # Not flushed yet
+
+            handler.record_simulation_data(0.2, {"x": 3.0})
+            assert handler._buffer_count == 0  # Auto-flushed at buffer_size=3
+
+            data = handler.load_simulation_data()
+            assert len(data["time"]) == 3
+
+    def test_set_buffer_size(self, tmp_path):
+        """Test set_buffer_size method."""
+        filename = str(tmp_path / "test.h5")
+        with HDF5Handler(filename) as handler:
+            assert handler._buffer_size == 1000
+
+            handler.set_buffer_size(500)
+            assert handler._buffer_size == 500
+
+            # Minimum is 1
+            handler.set_buffer_size(0)
+            assert handler._buffer_size == 1
+
+            handler.set_buffer_size(-5)
+            assert handler._buffer_size == 1
+
+    def test_close_flushes_buffer(self, tmp_path):
+        """Test that close() flushes remaining buffer data."""
+        filename = str(tmp_path / "test.h5")
+        handler = HDF5Handler(filename)
+        handler.open()
+        handler.record_simulation_data(0.0, {"x": 1.0})
+        handler.record_simulation_data(0.1, {"x": 2.0})
+        assert handler._buffer_count == 2
+
+        handler.close()
+        assert handler._buffer_count == 0
+        assert handler._file is None
+
+        # Reopen and verify data was flushed
+        handler2 = HDF5Handler(filename, mode='r') if False else HDF5Handler(filename)
+        handler2.open('r')
+        data = handler2.load_simulation_data()
+        assert "time" in data
+        assert len(data["time"]) == 2
+        handler2.close()
+
+    def test_record_simulation_data_no_file(self, tmp_path):
+        """Test record_simulation_data raises error when file not opened."""
+        filename = str(tmp_path / "test.h5")
+        handler = HDF5Handler(filename)
+        with pytest.raises(RuntimeError, match="not opened"):
+            handler.record_simulation_data(0.0, {"x": 1.0})
 
     def test_file_not_opened_error(self, tmp_path):
         """Test error when file not opened."""

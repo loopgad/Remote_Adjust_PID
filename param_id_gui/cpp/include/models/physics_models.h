@@ -125,7 +125,8 @@ public:
         int p = 4;              // 极对数
     };
 
-    explicit PMSMModel(const Params& params = Params{});
+    PMSMModel();
+    explicit PMSMModel(const Params& params);
 
     ModelOutput step(const std::vector<double>& inputs, double dt) override;
     void reset() override;
@@ -170,7 +171,8 @@ public:
         double out_max = 100;  // 输出上限
     };
 
-    explicit PIController(const Params& params = Params{});
+    PIController();
+    explicit PIController(const Params& params);
 
     double update(double setpoint, double measurement, double dt);
     void reset();
@@ -203,7 +205,8 @@ public:
         int p = 4;  // 极对数
     };
 
-    explicit FOCController(const Params& params = Params{});
+    FOCController();
+    explicit FOCController(const Params& params);
 
     ModelOutput step(const std::vector<double>& inputs, double dt) override;
     void reset() override;
@@ -254,7 +257,8 @@ public:
         double V_f = 0.7;      // 二极管正向压降 (V)
     };
 
-    explicit BuckConverter(const Params& params = Params{});
+    BuckConverter();
+    explicit BuckConverter(const Params& params);
 
     ModelOutput step(const std::vector<double>& inputs, double dt) override;
     void reset() override;
@@ -294,7 +298,8 @@ public:
         double V_f = 0.7;      // 二极管正向压降 (V)
     };
 
-    explicit BoostConverter(const Params& params = Params{});
+    BoostConverter();
+    explicit BoostConverter(const Params& params);
 
     ModelOutput step(const std::vector<double>& inputs, double dt) override;
     void reset() override;
@@ -330,7 +335,8 @@ public:
         double V_empty = 3.0;        // 放空电压 (V)
     };
 
-    explicit BatteryModel(const Params& params = Params{});
+    BatteryModel();
+    explicit BatteryModel(const Params& params);
 
     ModelOutput step(const std::vector<double>& inputs, double dt) override;
     void reset() override;

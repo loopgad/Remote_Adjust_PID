@@ -4,12 +4,13 @@
 """
 
 import time
+import threading
 import pytest
 import numpy as np
 from unittest.mock import MagicMock
 
 from param_id_gui.core.orchestrator import (
-    GlobalClock, StepResult, EnergyAudit, OrchestratorConfig,
+    GlobalClock, StepResult, ConvergenceAudit, OrchestratorConfig,
     Orchestrator, SimulationState
 )
 
@@ -94,33 +95,34 @@ class TestStepResult:
         assert result.computation_ns == 1000
 
 
-# ── EnergyAudit 测试 ─────────────────────────────────────────
+# ── ConvergenceAudit 测试 ──────────────────────────────────────
 
-class TestEnergyAudit:
-    """EnergyAudit 测试"""
+class TestConvergenceAudit:
+    """ConvergenceAudit 测试"""
 
     def test_default_values(self):
         """默认值正确"""
-        audit = EnergyAudit()
-        assert audit.power_input_j == 0.0
-        assert audit.mechanical_output_j == 0.0
-        assert audit.thermal_loss_j == 0.0
+        audit = ConvergenceAudit()
+        assert audit.max_error == 0.0
+        assert audit.avg_error == 0.0
+        assert audit.sample_count == 0
 
-    def test_imbalance_calculation(self):
-        """不平衡计算正确"""
-        audit = EnergyAudit(
-            power_input_j=100.0,
-            mechanical_output_j=90.0,
-            thermal_loss_j=8.0,
-            stored_energy_j=1.0,
-            imbalance_j=1.0
-        )
-        assert audit.imbalance_pct == pytest.approx(1.0)
+    def test_convergence_pct_no_error(self):
+        """无误差时收敛度100%"""
+        audit = ConvergenceAudit(max_error=0.0)
+        assert audit.convergence_pct == pytest.approx(100.0)
 
-    def test_zero_input_imbalance(self):
-        """零输入时不除零"""
-        audit = EnergyAudit(power_input_j=0.0, imbalance_j=0.0)
-        assert audit.imbalance_pct == pytest.approx(0.0)
+    def test_convergence_pct_with_error(self):
+        """有误差时收敛度正确计算"""
+        audit = ConvergenceAudit(max_error=0.5, avg_error=0.2, sample_count=100)
+        assert audit.convergence_pct == pytest.approx(50.0)
+
+    def test_convergence_pct_full_divergence(self):
+        """误差≥1时收敛度为0"""
+        audit = ConvergenceAudit(max_error=1.0)
+        assert audit.convergence_pct == pytest.approx(0.0)
+        audit2 = ConvergenceAudit(max_error=2.0)
+        assert audit2.convergence_pct == pytest.approx(0.0)
 
 
 # ── OrchestratorConfig 测试 ──────────────────────────────────
@@ -223,8 +225,7 @@ class TestOrchestratorRun:
         orch.run(step_ns=50000, duration_s=0.01, progress_callback=progress_callback)
 
         assert len(progress_values) > 0
-        # Last progress should be close to 1.0 (or at least > 0)
-        assert progress_values[-1] > 0.0
+        assert progress_values[-1] >= 0.9
 
     def test_run_invalid_step(self):
         """无效步长抛出异常"""
@@ -249,8 +250,8 @@ class TestOrchestratorDivergence:
     """发散处理测试"""
 
     def test_divergence_detection(self):
-        """发散检测"""
-        orch = Orchestrator(OrchestratorConfig(auto_step_halving=False))
+        """发散检测 — 当 auto_step_halving 启用且所有步都发散时应触发 diverged"""
+        orch = Orchestrator(OrchestratorConfig(auto_step_halving=True, max_step_halving=2))
 
         call_count = 0
         def diverging_stepper(step_ns):
@@ -261,8 +262,8 @@ class TestOrchestratorDivergence:
         orch.register_stepper("test", diverging_stepper)
         orch.run(step_ns=50000, duration_s=0.001)
 
-        # After enough divergences, simulation should stop
-        assert orch.clock.diverged or call_count > 0
+        # After max_step_halving exhausted, simulation should mark diverged
+        assert orch.clock.diverged
 
     def test_auto_step_halving(self):
         """自动步长减半"""
@@ -316,20 +317,119 @@ class TestOrchestratorFaultInjection:
 class TestOrchestratorStopCondition:
     """停止条件测试"""
 
-    def test_stop_condition(self):
-        """停止条件触发（记录日志但不中断外层循环）"""
+    def test_stop_condition_breaks_outer_loop(self):
+        """停止条件触发后外层仿真循环应终止"""
         orch = Orchestrator()
-        # Stop condition is checked but doesn't break outer loop in current impl
+        # Stop when sim_time reaches 500us (10 steps at 50us each)
         orch.add_stop_condition(lambda: orch.clock.sim_time_ns >= 500000)
 
         def mock_stepper(step_ns):
             return StepResult(solver_id="test")
 
         orch.register_stepper("test", mock_stepper)
-        orch.run(step_ns=50000, duration_s=0.01)
+        orch.run(step_ns=50000, duration_s=0.01)  # 200 steps total
 
-        # Simulation runs to completion (stop condition only logs)
-        assert orch.clock.step_count > 0
+        # Simulation should stop early at ~10 steps, not run all 200
+        assert orch.clock.step_count <= 12, (
+            f"Stop condition didn't break outer loop: {orch.clock.step_count} steps"
+        )
+        assert orch.clock.step_count >= 9, "Simulation didn't run enough before stop"
+
+    def test_stop_condition_no_hooks_no_early_stop(self):
+        """无停止条件时仿真正常完成全部步数"""
+        orch = Orchestrator()
+
+        def mock_stepper(step_ns):
+            return StepResult(solver_id="test")
+
+        orch.register_stepper("test", mock_stepper)
+        orch.run(step_ns=50000, duration_s=0.001)  # 20 steps
+
+        assert orch.clock.step_count == 20
+
+
+class TestOrchestratorPauseResume:
+    """Pause/Resume 测试（Bug #6）"""
+
+    def test_pause_actually_pauses(self):
+        """暂停后仿真停止推进，恢复后继续"""
+        orch = Orchestrator()
+
+        def step_fn(step_ns):
+            return StepResult(solver_id="test")
+
+        orch.register_stepper("test", step_fn)
+        thread = threading.Thread(target=lambda: orch.run(step_ns=50000, duration_s=60.0), daemon=True)
+        thread.start()
+
+        # Wait for simulation to start
+        deadline = time.monotonic() + 2.0
+        while orch.clock.step_count < 10:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        assert orch.clock.step_count >= 10, "Simulation didn't start"
+
+        # Pause and wait for it to stabilize
+        orch.pause()
+        time.sleep(0.5)
+        count_a = orch.clock.step_count
+        time.sleep(0.3)
+        count_b = orch.clock.step_count
+        assert count_a == count_b, (
+            f"Step count still growing after pause stabilization: {count_a} -> {count_b}"
+        )
+
+        # Resume
+        orch.set_state(SimulationState.RUNNING)
+        time.sleep(0.2)
+        count_after = orch.clock.step_count
+        assert count_after > count_b, (
+            f"Step count didn't increase after resume: {count_b} -> {count_after}"
+        )
+
+        orch.stop()
+
+
+class TestOrchestratorStepBounds:
+    """步数边界测试（Bug #7）"""
+
+    def test_zero_steps_raises(self):
+        """零步数抛出异常"""
+        orch = Orchestrator()
+        orch.register_stepper("test", MagicMock(return_value=StepResult(solver_id="test")))
+        with pytest.raises(ValueError, match="0 steps"):
+            orch.run(step_ns=1_000_000_000, duration_s=0.001)
+
+    def test_huge_steps_raises(self):
+        """超大步数抛出异常"""
+        orch = Orchestrator()
+        orch.register_stepper("test", MagicMock(return_value=StepResult(solver_id="test")))
+        with pytest.raises(ValueError, match="10M steps"):
+            orch.run(step_ns=1, duration_s=1.0)
+
+
+class TestOrchestratorStepHalving:
+    """步长减半测试"""
+
+    def test_step_halving_minimum(self):
+        """步长减半不会降到 0 导致死循环"""
+        orch = Orchestrator(OrchestratorConfig(
+            auto_step_halving=True, max_step_halving=100
+        ))
+
+        call_count = [0]
+
+        def diverging_stepper(step_ns):
+            call_count[0] += 1
+            # Always report non-converged to trigger halving
+            return StepResult(solver_id="test", converged=False, error_estimate=1.0)
+
+        orch.register_stepper("test", diverging_stepper)
+        orch.run(step_ns=1, duration_s=1e-9)  # 1 step
+
+        # Should complete (not hang) even with aggressive halving
+        assert call_count[0] >= 1
 
 
 class TestOrchestratorEnergyAudit:
@@ -337,17 +437,32 @@ class TestOrchestratorEnergyAudit:
 
     def test_energy_audit_enabled(self):
         """启用能量审计"""
-        config = OrchestratorConfig(enable_energy_audit=True, energy_audit_period_steps=10)
+        config = OrchestratorConfig(
+            enable_energy_audit=True, energy_audit_period_steps=10,
+            auto_step_halving=False,
+        )
         orch = Orchestrator(config)
 
+        step_idx = 0
         def mock_stepper(step_ns):
+            nonlocal step_idx
+            step_idx += 1
+            # Every 5th step reports non-convergence with a small error
+            if step_idx % 5 == 0:
+                return StepResult(solver_id="test", converged=False, error_estimate=0.01)
             return StepResult(solver_id="test")
 
         orch.register_stepper("test", mock_stepper)
         orch.run(step_ns=50000, duration_s=0.001)
 
         # Energy audits should be collected
-        assert len(orch._energy_audits) >= 0  # May or may not have audits
+        assert len(orch._energy_audits) > 0
+        # Each audit should have valid data
+        for audit in orch._energy_audits:
+            assert isinstance(audit.max_error, float)
+            assert isinstance(audit.avg_error, float)
+        # At least one audit should have sampled error data
+        assert any(a.sample_count > 0 for a in orch._energy_audits)
 
     def test_energy_audit_disabled(self):
         """禁用能量审计"""
@@ -413,7 +528,10 @@ class TestOrchestratorIntegration:
 
         orch.run(step_ns=50000, duration_s=0.001)
 
-        # Both solvers should have run
-        assert len(results['s1']) > 0
-        assert len(results['s2']) > 0
+        # Both solvers should have run for all 20 steps
+        assert len(results['s1']) == 20
+        assert len(results['s2']) == 20
         assert len(results['s1']) == len(results['s2'])
+
+
+

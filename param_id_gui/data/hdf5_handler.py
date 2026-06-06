@@ -1,8 +1,10 @@
 """HDF5 data handler for simulation data storage and playback."""
 
 from typing import Any, Dict, List, Optional
-from pathlib import Path
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     import h5py
@@ -18,11 +20,12 @@ class HDF5Handler:
     in HDF5 format, including real-time recording and data playback.
     """
     
-    def __init__(self, filename: str = "simulation_data.h5"):
+    def __init__(self, filename: str = "simulation_data.h5", buffer_size: int = 1000):
         """Initialize HDF5 handler.
         
         Args:
             filename: HDF5 filename
+            buffer_size: Number of data points to buffer before writing to disk
         """
         if not HDF5_AVAILABLE:
             raise ImportError("h5py is required for HDF5 support. Install with: pip install h5py")
@@ -30,6 +33,9 @@ class HDF5Handler:
         self.filename = filename
         self._file: Optional[h5py.File] = None
         self._datasets: Dict[str, h5py.Dataset] = {}
+        self._buffer: Dict[str, list] = {}
+        self._buffer_size = buffer_size
+        self._buffer_count = 0
     
     def open(self, mode: str = 'a'):
         """Open HDF5 file.
@@ -40,9 +46,16 @@ class HDF5Handler:
         self._file = h5py.File(self.filename, mode)
     
     def close(self):
-        """Close HDF5 file."""
+        """Close HDF5 file with flush."""
+        try:
+            self.flush()  # Ensure buffer data is written
+        except Exception:
+            logger.debug("Flush failed during close, proceeding with file close")
         if self._file is not None:
-            self._file.close()
+            try:
+                self._file.close()
+            except Exception:
+                logger.debug("File close failed")
             self._file = None
     
     def __enter__(self):
@@ -93,6 +106,31 @@ class HDF5Handler:
         
         dataset.resize((new_size,))
         dataset[current_size:] = data
+    
+    def flush(self):
+        """Flush buffer to HDF5 file."""
+        if self._buffer_count == 0:
+            return
+        
+        for key, values in self._buffer.items():
+            # Create dataset if it doesn't exist
+            if key not in self._datasets:
+                self.create_dataset(key, shape=(0,), maxshape=(None,), dtype='float64')
+            
+            # Batch write
+            self.append_data(key, np.array(values))
+        
+        # Clear buffer
+        self._buffer = {}
+        self._buffer_count = 0
+    
+    def set_buffer_size(self, size: int):
+        """Set buffer size for batch writes.
+        
+        Args:
+            size: Buffer size (minimum 1)
+        """
+        self._buffer_size = max(1, size)
     
     def get_data(self, name: str, start: Optional[int] = None, end: Optional[int] = None) -> np.ndarray:
         """Get data from a dataset.
@@ -154,7 +192,7 @@ class HDF5Handler:
         }
     
     def record_simulation_data(self, time: float, data: Dict[str, float]):
-        """Record simulation data point.
+        """Record simulation data point with buffering.
         
         Args:
             time: Simulation time
@@ -163,19 +201,22 @@ class HDF5Handler:
         if self._file is None:
             raise RuntimeError("HDF5 file not opened")
         
-        # Create time dataset if it doesn't exist
-        if 'time' not in self._datasets:
-            self.create_dataset('time', shape=(0,), maxshape=(None,), dtype='float64')
+        # Buffer time
+        if 'time' not in self._buffer:
+            self._buffer['time'] = []
+        self._buffer['time'].append(time)
         
-        # Append time
-        self.append_data('time', np.array([time]))
-        
-        # Append each data value
+        # Buffer data
         for key, value in data.items():
-            if key not in self._datasets:
-                self.create_dataset(key, shape=(0,), maxshape=(None,), dtype='float64')
-            
-            self.append_data(key, np.array([value]))
+            if key not in self._buffer:
+                self._buffer[key] = []
+            self._buffer[key].append(value)
+        
+        self._buffer_count += 1
+        
+        # Flush when buffer is full
+        if self._buffer_count >= self._buffer_size:
+            self.flush()
     
     def load_simulation_data(self) -> Dict[str, np.ndarray]:
         """Load all simulation data.

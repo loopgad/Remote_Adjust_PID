@@ -3,8 +3,7 @@
 import pytest
 import math
 from param_id_gui.models.power.power_models import (
-    BuckConverter, BuckConverterParameters,
-    BoostConverter, BoostConverterParameters,
+    BuckConverter, BoostConverter,
 )
 
 
@@ -13,17 +12,16 @@ class TestBuckConverter:
 
     def test_default_parameters(self):
         """Test default parameter values."""
-        params = BuckConverterParameters()
-        assert params.Vin == 12.0
-        assert params.L == 0.001
-        assert params.C == 0.0001
-        assert params.R == 0.01
-        assert params.Rl == 0.05
-        assert params.f_sw == 100000
+        converter = BuckConverter()
+        assert converter.params.Vin == 12.0
+        assert converter.params.L == 100e-6
+        assert converter.params.C == 100e-6
+        assert converter.params.f_sw == 100000
 
     def test_custom_parameters(self):
         """Test custom parameter values."""
-        params = BuckConverterParameters(Vin=24.0, L=0.002, C=0.0002)
+        from param_id_gui.core.types import BuckConverterParams
+        params = BuckConverterParams(Vin=24.0, L=0.002, C=0.0002)
         assert params.Vin == 24.0
         assert params.L == 0.002
         assert params.C == 0.0002
@@ -76,7 +74,7 @@ class TestBuckConverter:
         v_expected = duty * converter.params.Vin
         # Allow 50% tolerance for Euler integration with default params
         # The model has significant losses due to Rl
-        assert v_out > 0
+        assert abs(v_out - duty * converter.params.Vin) / (duty * converter.params.Vin) < 0.6
         assert not math.isnan(v_out)
 
     def test_reset(self):
@@ -114,17 +112,16 @@ class TestBoostConverter:
 
     def test_default_parameters(self):
         """Test default parameter values."""
-        params = BoostConverterParameters()
-        assert params.Vin == 5.0
-        assert params.L == 0.001
-        assert params.C == 0.0001
-        assert params.R == 0.01
-        assert params.Rl == 0.05
-        assert params.f_sw == 100000
+        converter = BoostConverter()
+        assert converter.params.Vin == 5.0
+        assert converter.params.L == 100e-6
+        assert converter.params.C == 100e-6
+        assert converter.params.f_sw == 100000
 
     def test_custom_parameters(self):
         """Test custom parameter values."""
-        params = BoostConverterParameters(Vin=12.0, L=0.003, C=0.0003)
+        from param_id_gui.core.types import BoostConverterParams
+        params = BoostConverterParams(Vin=12.0, L=0.003, C=0.0003)
         assert params.Vin == 12.0
         assert params.L == 0.003
         assert params.C == 0.0003
@@ -174,8 +171,9 @@ class TestBoostConverter:
             converter.update(dt)
         
         v_out = converter.get_output_voltage()
-        # Boost converter needs time to charge, just verify it's positive and not NaN
-        assert v_out > 0
+        # Boost converter: verify positive output and reasonable magnitude
+        # Ideal steady state is Vin/(1-D) = 5/0.5 = 10V, but losses reduce it
+        assert v_out > 1.5, f"Boost output {v_out}V too low, expected >1.5V (ideal ~10V, losses apply)"
         assert not math.isnan(v_out)
 
     def test_reset(self):
@@ -234,8 +232,48 @@ class TestConverterComparison:
         
         v_out = converter.get_output_voltage()
         # Just verify it's positive and not NaN (steady state depends on losses)
-        assert v_out > 0
+        assert v_out > 1.0, f"Boost output {v_out}V too low after 100k steps"
         assert not math.isnan(v_out)
+
+
+class TestBatteryGetState:
+    """Tests for battery/inverter get_state() protocol compliance."""
+
+    def test_ideal_battery_get_state(self):
+        from param_id_gui.models.power.power_models import IdealBattery
+        bat = IdealBattery(v_nom=48.0)
+        state = bat.get_state()
+        assert "voltage" in state
+        assert state["voltage"] == 48.0
+
+    def test_ideal_battery_get_state_after_step(self):
+        from param_id_gui.models.power.power_models import IdealBattery
+        bat = IdealBattery(v_nom=48.0)
+        bat.step({"i_load": 10.0})
+        state = bat.get_state()
+        assert state["voltage"] == 48.0  # Ideal battery unaffected by load
+
+    def test_rint_battery_get_state(self):
+        from param_id_gui.models.power.power_models import RintBattery
+        bat = RintBattery(v_oc=48.0, r_int=0.05)
+        state = bat.get_state()
+        assert "voltage" in state
+        assert state["voltage"] == 48.0
+
+    def test_rint_battery_get_state_under_load(self):
+        from param_id_gui.models.power.power_models import RintBattery
+        bat = RintBattery(v_oc=48.0, r_int=0.05)
+        bat.step({"i_load": 10.0})
+        state = bat.get_state()
+        assert state["voltage"] < 48.0  # Voltage drops under load
+        assert state["voltage"] > 0
+
+    def test_average_inverter_get_state(self):
+        from param_id_gui.models.power.power_models import AverageInverter
+        inv = AverageInverter(v_bus=48.0)
+        state = inv.get_state()
+        assert "v_bus" in state
+        assert state["v_bus"] == 48.0
 
 
 if __name__ == '__main__':

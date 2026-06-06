@@ -126,7 +126,7 @@ class TestPerformanceBenchmark:
         n_steps = 10000
         start = time.perf_counter()
         for _ in range(n_steps):
-            model.step(10.0, 5.0, dt=50e-6)
+            model.step_dq(10.0, 5.0, dt=50e-6)
         elapsed = time.perf_counter() - start
 
         steps_per_sec = n_steps / elapsed
@@ -178,11 +178,14 @@ class TestScalability:
         orch = Orchestrator()
         count = 0
 
-        def counter():
+        def counter(step_ns):
             nonlocal count
             count += 1
+            from param_id_gui.core.orchestrator import StepResult
+            return StepResult(solver_id="bench")
 
-        orch.run_simple(counter, step_ns=50000, duration_s=0.1)
+        orch.register_stepper("bench", counter)
+        orch.run(step_ns=50000, duration_s=0.1)
         expected = int(0.1 * 1e9 / 50000)
         assert count == expected
 
@@ -191,7 +194,6 @@ class TestScalability:
         from param_id_gui.core.data_bus import DataBus, Signal
 
         bus = DataBus(max_history=1000)
-        bus.register_module("test")
 
         n_signals = 5000
         for i in range(n_signals):

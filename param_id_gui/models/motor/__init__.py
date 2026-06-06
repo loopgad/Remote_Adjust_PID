@@ -1,5 +1,5 @@
 """Motor models including PMSM dq-axis model."""
 
-from .pmsm_dq import PMSMModel
+from .pmsm_dq import PMSMdqModel
 
-__all__ = ["PMSMModel"]
+__all__ = ["PMSMdqModel"]

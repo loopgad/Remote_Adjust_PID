@@ -4,20 +4,18 @@ Provides interface for editing model parameters, managing presets,
 and validating parameter values.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QLabel, QLineEdit, QDoubleSpinBox, QComboBox,
-    QPushButton, QGroupBox, QScrollArea, QMessageBox,
-    QTabWidget, QSpinBox, QCheckBox
+    QLabel, QDoubleSpinBox, QComboBox,
+    QPushButton, QGroupBox, QMessageBox,
+    QTabWidget
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Signal
 
 from param_id_gui.core.types import (
     PMSMParams, BuckConverterParams, BoostConverterParams, FOCParams
 )
-from param_id_gui.utils.validation import InputValidator
 
 
 class ParameterWidget(QWidget):
@@ -58,7 +56,7 @@ class ParameterWidget(QWidget):
         self._spin_box.setRange(min_val, max_val)
         self._spin_box.setDecimals(decimals)
         self._spin_box.setValue(value)
-        self._spin_box.setSingleStep(0.1)
+        self._spin_box.setSingleStep(max((max_val - min_val) / 1000, 10 ** (-decimals)))
         self._spin_box.valueChanged.connect(self._on_value_changed)
         layout.addWidget(self._spin_box)
         
@@ -101,11 +99,11 @@ class ModelConfigPanel(QWidget):
             "Default": PMSMParams(),
             "High Performance": PMSMParams(
                 Rs=0.5, Ld=0.005, Lq=0.008,
-                psi_f=0.15, J=0.005, B=0.005, p=4
+                flux_pm=0.15, J=0.005, B=0.005, Pp=4
             ),
             "Low Inertia": PMSMParams(
                 Rs=1.0, Ld=0.002, Lq=0.003,
-                psi_f=0.1, J=0.0005, B=0.001, p=2
+                flux_pm=0.1, J=0.0005, B=0.001, Pp=2
             ),
         },
         "Buck Converter": {
@@ -121,11 +119,13 @@ class ModelConfigPanel(QWidget):
         "FOC Controller": {
             "Default": FOCParams(),
             "Fast Response": FOCParams(
-                current_kp=5.0, current_ki=500.0,
+                id_kp=5.0, id_ki=500.0,
+                iq_kp=5.0, iq_ki=500.0,
                 speed_kp=2.0, speed_ki=50.0
             ),
             "Conservative": FOCParams(
-                current_kp=0.5, current_ki=50.0,
+                id_kp=0.5, id_ki=50.0,
+                iq_kp=0.5, iq_ki=50.0,
                 speed_kp=0.5, speed_ki=10.0
             ),
         },
@@ -188,7 +188,7 @@ class ModelConfigPanel(QWidget):
         
         # Status label
         self._status_label = QLabel("Ready")
-        self._status_label.setStyleSheet("color: gray;")
+        self._status_label.setObjectName("statusIdle")
         main_layout.addWidget(self._status_label)
     
     def _on_model_changed(self, model_name: str):
@@ -242,7 +242,7 @@ class ModelConfigPanel(QWidget):
             "Rs": ("Stator Resistance", 0.8, 0.001, 100.0, "Ω"),
             "Ld": ("d-axis Inductance", 0.008, 0.0001, 1.0, "H"),
             "Lq": ("q-axis Inductance", 0.012, 0.0001, 1.0, "H"),
-            "psi_f": ("Flux Linkage", 0.12, 0.001, 10.0, "Wb"),
+            "flux_pm": ("Flux Linkage", 0.12, 0.001, 10.0, "Wb"),
         }
         
         self._param_widgets["PMSM"] = {}
@@ -260,7 +260,7 @@ class ModelConfigPanel(QWidget):
         mech_params = {
             "J": ("Rotor Inertia", 0.001, 0.0001, 1.0, "kg·m²"),
             "B": ("Friction Coefficient", 0.001, 0.0, 1.0, "N·m·s"),
-            "p": ("Pole Pairs", 4, 1, 20, ""),
+            "Pp": ("Pole Pairs", 4, 1, 20, ""),
         }
         
         for name, (label, value, min_val, max_val, unit) in mech_params.items():
@@ -280,8 +280,7 @@ class ModelConfigPanel(QWidget):
             "Vin": ("Input Voltage", 12.0, 1.0, 100.0, "V"),
             "L": ("Inductance", 0.001, 0.0001, 0.1, "H"),
             "C": ("Capacitance", 0.0001, 0.00001, 0.01, "F"),
-            "R": ("ESR", 0.01, 0.001, 10.0, "Ω"),
-            "Rl": ("Inductor Resistance", 0.05, 0.001, 10.0, "Ω"),
+            "R_load": ("Load Resistance", 10.0, 0.001, 100.0, "Ω"),
             "f_sw": ("Switching Freq", 100000, 1000, 1000000, "Hz"),
         }
         
@@ -303,8 +302,7 @@ class ModelConfigPanel(QWidget):
             "Vin": ("Input Voltage", 5.0, 1.0, 100.0, "V"),
             "L": ("Inductance", 0.001, 0.0001, 0.1, "H"),
             "C": ("Capacitance", 0.0001, 0.00001, 0.01, "F"),
-            "R": ("ESR", 0.01, 0.001, 10.0, "Ω"),
-            "Rl": ("Inductor Resistance", 0.05, 0.001, 10.0, "Ω"),
+            "R_load": ("Load Resistance", 10.0, 0.001, 100.0, "Ω"),
             "f_sw": ("Switching Freq", 100000, 1000, 1000000, "Hz"),
         }
         
@@ -324,8 +322,10 @@ class ModelConfigPanel(QWidget):
         current_layout = QFormLayout(current_widget)
         
         current_params = {
-            "current_kp": ("Current Kp", 1.0, 0.01, 100.0, ""),
-            "current_ki": ("Current Ki", 100.0, 0.1, 10000.0, ""),
+            "id_kp": ("d-axis Kp", 1.0, 0.01, 100.0, ""),
+            "id_ki": ("d-axis Ki", 100.0, 0.1, 10000.0, ""),
+            "iq_kp": ("q-axis Kp", 1.0, 0.01, 100.0, ""),
+            "iq_ki": ("q-axis Ki", 100.0, 0.1, 10000.0, ""),
         }
         
         self._param_widgets["FOC Controller"] = {}
@@ -380,10 +380,10 @@ class ModelConfigPanel(QWidget):
             self._validate_current_params()
             self.params_changed.emit(model_name, params)
             self._status_label.setText("Parameters applied successfully")
-            self._status_label.setStyleSheet("color: green;")
+            self._set_status_style("statusRunning")
         except ValueError as e:
             self._status_label.setText(f"Validation error: {e}")
-            self._status_label.setStyleSheet("color: red;")
+            self._set_status_style("statusError")
     
     def _reset_params(self):
         """Reset parameters to default."""
@@ -393,19 +393,25 @@ class ModelConfigPanel(QWidget):
             if "Default" in presets:
                 self._load_params_from_model(presets["Default"])
                 self._status_label.setText("Parameters reset to default")
-                self._status_label.setStyleSheet("color: gray;")
+                self._set_status_style("statusIdle")
     
     def _validate_params(self):
         """Validate current parameters."""
         try:
             self._validate_current_params()
             self._status_label.setText("All parameters valid")
-            self._status_label.setStyleSheet("color: green;")
+            self._set_status_style("statusRunning")
             QMessageBox.information(self, "Validation", "All parameters are valid!")
         except ValueError as e:
             self._status_label.setText(f"Validation error: {e}")
-            self._status_label.setStyleSheet("color: red;")
+            self._set_status_style("statusError")
             QMessageBox.warning(self, "Validation Error", str(e))
+    
+    def _set_status_style(self, object_name: str) -> None:
+        """Update status label style via objectName + QSS."""
+        self._status_label.setObjectName(object_name)
+        self._status_label.style().unpolish(self._status_label)
+        self._status_label.style().polish(self._status_label)
     
     def _validate_current_params(self):
         """Validate current parameter values."""
@@ -424,7 +430,7 @@ class ModelConfigPanel(QWidget):
             if model_name == "PMSM":
                 if name in ("Rs", "Ld", "Lq", "J", "B") and value <= 0:
                     raise ValueError(f"Parameter '{name}' must be positive")
-                if name == "p" and value < 1:
+                if name == "Pp" and value < 1:
                     raise ValueError(f"Parameter '{name}' must be >= 1")
             elif model_name in ("Buck Converter", "Boost Converter"):
                 if name in ("L", "C") and value <= 0:
@@ -443,3 +449,28 @@ class ModelConfigPanel(QWidget):
             params[name] = widget.get_value()
         
         return params
+
+    def get_model_name(self) -> str:
+        """Get current model name."""
+        return self._current_model
+
+    def get_params(self) -> Dict[str, float]:
+        """Get current parameter values (alias for get_current_params)."""
+        return self.get_current_params()
+
+    def reset_to_defaults(self):
+        """Reset all parameters to defaults."""
+        self._reset_params()
+
+    def load_params(self, model_name: str, params: Dict[str, float]):
+        """Load parameters for a given model.
+
+        Args:
+            model_name: Model name (e.g. "PMSM")
+            params: Parameter dictionary
+        """
+        if model_name in self.PRESETS:
+            self._model_combo.setCurrentText(model_name)
+        for name, value in params.items():
+            if model_name in self._param_widgets and name in self._param_widgets[model_name]:
+                self._param_widgets[model_name][name].set_value(value)

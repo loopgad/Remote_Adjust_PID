@@ -4,7 +4,7 @@ Provides interface for simulation control, real-time waveform visualization,
 and simulation status monitoring.
 """
 
-from typing import Optional, Dict, Any, List, TYPE_CHECKING
+from typing import Optional, Dict, Any, TYPE_CHECKING
 import numpy as np
 from collections import deque
 
@@ -14,11 +14,11 @@ if TYPE_CHECKING:
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QGroupBox, QComboBox,
-    QDoubleSpinBox, QSpinBox, QCheckBox, QProgressBar,
-    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView
+    QDoubleSpinBox, QCheckBox, QProgressBar,
+    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView,
+    QMessageBox
 )
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QColor
 
 try:
     import matplotlib
@@ -47,6 +47,7 @@ class WaveformWidget(QWidget):
         self._max_points = max_points
         self._data: Dict[str, deque] = {}
         self._time_data: deque = deque(maxlen=max_points)
+        self._lines: Dict = {}
         
         self._setup_ui()
     
@@ -79,7 +80,8 @@ class WaveformWidget(QWidget):
         self._data[name] = deque(maxlen=self._max_points)
         
         if MATPLOTLIB_AVAILABLE:
-            self._ax.plot([], [], label=name, color=color)
+            line, = self._ax.plot([], [], label=name, color=color)
+            self._lines[name] = line
             self._ax.legend()
     
     def update_data(self, time: float, values: Dict[str, float]):
@@ -99,24 +101,19 @@ class WaveformWidget(QWidget):
             self._update_plot()
     
     def _update_plot(self):
-        """Update the matplotlib plot."""
+        """Update the matplotlib plot using incremental line updates."""
         if not self._time_data:
             return
-        
-        self._ax.clear()
-        self._ax.set_title(self._title)
-        self._ax.set_xlabel("Time (s)")
-        self._ax.set_ylabel("Value")
-        self._ax.grid(True)
         
         time_array = np.array(self._time_data)
         
         for name, data in self._data.items():
-            if data:
-                self._ax.plot(time_array[-len(data):], list(data), label=name)
+            if data and name in self._lines:
+                self._lines[name].set_data(time_array[-len(data):], list(data))
         
-        self._ax.legend()
-        self._canvas.draw()
+        self._ax.relim()
+        self._ax.autoscale_view()
+        self._canvas.draw_idle()
     
     def clear(self):
         """Clear all data."""
@@ -128,6 +125,7 @@ class WaveformWidget(QWidget):
             self._ax.clear()
             self._ax.set_title(self._title)
             self._ax.grid(True)
+            self._lines.clear()
             self._canvas.draw()
 
 
@@ -152,7 +150,7 @@ class SimulationPanel(QWidget):
         self._is_running = False
         self._is_paused = False
         self._simulation_time = 0.0
-        self._update_timer = QTimer()
+        self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._update_display)
         
         self._setup_ui()
@@ -163,6 +161,15 @@ class SimulationPanel(QWidget):
         Args:
             controller: SimulationController instance
         """
+        # Disconnect old controller signals
+        if self._controller:
+            try:
+                self._controller.state_changed.disconnect(self._on_state_changed)
+                self._controller.step_completed.disconnect(self._on_step_completed)
+                self._controller.error_occurred.disconnect(self._on_error)
+            except (RuntimeError, TypeError):
+                pass
+
         self._controller = controller
         
         # Connect controller signals
@@ -179,13 +186,13 @@ class SimulationPanel(QWidget):
             self._pause_btn.setEnabled(True)
             self._stop_btn.setEnabled(True)
             self._status_label.setText("Running")
-            self._status_label.setStyleSheet("color: green;")
+            self._set_status_style("statusRunning")
             self._update_timer.start(50)  # 20 FPS
         elif state == "paused":
             self._is_paused = True
             self._pause_btn.setText("Resume")
             self._status_label.setText("Paused")
-            self._status_label.setStyleSheet("color: orange;")
+            self._set_status_style("statusWarning")
             self._update_timer.stop()
         elif state == "idle":
             self._is_running = False
@@ -195,7 +202,7 @@ class SimulationPanel(QWidget):
             self._stop_btn.setEnabled(False)
             self._pause_btn.setText("Pause")
             self._status_label.setText("Idle")
-            self._status_label.setStyleSheet("color: gray;")
+            self._set_status_style("statusIdle")
             self._update_timer.stop()
         elif state == "stopped":
             self._is_running = False
@@ -205,7 +212,7 @@ class SimulationPanel(QWidget):
             self._stop_btn.setEnabled(False)
             self._pause_btn.setText("Pause")
             self._status_label.setText("Stopped")
-            self._status_label.setStyleSheet("color: gray;")
+            self._set_status_style("statusIdle")
             self._update_timer.stop()
         elif state == "error":
             self._is_running = False
@@ -214,8 +221,14 @@ class SimulationPanel(QWidget):
             self._pause_btn.setEnabled(False)
             self._stop_btn.setEnabled(False)
             self._status_label.setText("Error")
-            self._status_label.setStyleSheet("color: red;")
+            self._set_status_style("statusError")
             self._update_timer.stop()
+    
+    def _set_status_style(self, object_name: str) -> None:
+        """Update status label style via objectName + QSS."""
+        self._status_label.setObjectName(object_name)
+        self._status_label.style().unpolish(self._status_label)
+        self._status_label.style().polish(self._status_label)
     
     def _on_step_completed(self, state: Dict[str, Any]) -> None:
         """Handle step completed from controller."""
@@ -247,23 +260,26 @@ class SimulationPanel(QWidget):
         button_layout = QHBoxLayout()
         
         self._start_btn = QPushButton("Start")
-        self._start_btn.setStyleSheet("background-color: #4CAF50; color: white;")
+        self._start_btn.setObjectName("startButton")
+        self._start_btn.setToolTip("Start simulation (F5)")
         self._start_btn.clicked.connect(self._on_start)
         button_layout.addWidget(self._start_btn)
         
         self._pause_btn = QPushButton("Pause")
-        self._pause_btn.setStyleSheet("background-color: #FF9800; color: white;")
+        self._pause_btn.setToolTip("Pause or resume simulation (F6)")
         self._pause_btn.clicked.connect(self._on_pause)
         self._pause_btn.setEnabled(False)
         button_layout.addWidget(self._pause_btn)
         
         self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setStyleSheet("background-color: #f44336; color: white;")
+        self._stop_btn.setObjectName("dangerButton")
+        self._stop_btn.setToolTip("Stop simulation (F7)")
         self._stop_btn.clicked.connect(self._on_stop)
         self._stop_btn.setEnabled(False)
         button_layout.addWidget(self._stop_btn)
         
         self._reset_btn = QPushButton("Reset")
+        self._reset_btn.setToolTip("Reset simulation to initial state")
         self._reset_btn.clicked.connect(self._on_reset)
         button_layout.addWidget(self._reset_btn)
         
@@ -308,7 +324,7 @@ class SimulationPanel(QWidget):
         status_layout.addRow("Simulation Time:", self._time_label)
         
         self._status_label = QLabel("Stopped")
-        self._status_label.setStyleSheet("color: gray;")
+        self._status_label.setObjectName("statusIdle")
         status_layout.addRow("Status:", self._status_label)
         
         self._step_count_label = QLabel("0")
@@ -384,12 +400,8 @@ class SimulationPanel(QWidget):
         """Handle pause button click."""
         if self._is_running and self._controller:
             if self._is_paused:
-                # Resume - restart simulation
-                model_name = self._model_combo.currentText()
-                duration = self._duration_spin.value()
-                step_size = self._step_size_spin.value()
-                params = self._controller.get_current_params() or {}
-                self._controller.start_simulation(model_name, params, duration, step_size)
+                # Resume - continue from where we left off
+                self._controller.resume_simulation()
             else:
                 # Pause
                 self._controller.pause_simulation()
@@ -411,7 +423,9 @@ class SimulationPanel(QWidget):
         
         # Reset data table
         for i in range(self._data_table.rowCount()):
-            self._data_table.item(i, 1).setText("0.0")
+            item = self._data_table.item(i, 1)
+            if item is not None:
+                item.setText("0.0")
     
     def _update_display(self):
         """Update display with current simulation data."""
@@ -422,9 +436,17 @@ class SimulationPanel(QWidget):
         data = self._controller.get_latest_data()
         
         # Update time display
-        time = data.get("time", 0.0)
-        self._time_label.setText(f"{time:.3f} s")
-        self._simulation_time = time
+        sim_time = data.get("time", 0.0)
+        if sim_time is None:
+            sim_time = 0.0
+        self._time_label.setText(f"{sim_time:.3f} s")
+        self._simulation_time = sim_time
+
+        # Update progress bar
+        duration = self._duration_spin.value()
+        if duration > 0:
+            pct = min(int(sim_time / duration * 100), 100)
+            self._progress_bar.setValue(pct)
         
         # Update step count
         step_count = data.get("step_count", 0)
@@ -444,7 +466,7 @@ class SimulationPanel(QWidget):
                 waveform_data[key] = data[key]
         
         if waveform_data:
-            self.update_waveforms(time, waveform_data)
+            self.update_waveforms(sim_time, waveform_data)
     
     def update_waveforms(self, time: float, data: Dict[str, float]):
         """Update waveform displays.

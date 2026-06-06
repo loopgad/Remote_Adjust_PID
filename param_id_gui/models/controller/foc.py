@@ -10,16 +10,10 @@ Security:
 """
 
 import math
-import numpy as np
+from typing import Optional, Tuple
+from param_id_gui.core.numeric_utils import guard_numeric as _guard_numeric, cached_cos_sin as _cached_cos_sin
 
 _PWM_EPS_V = 1e-12  # minimum bus voltage [V]
-
-
-def _guard_numeric(value: float, fallback: float = 0.0) -> float:
-    """Guard against NaN/Inf."""
-    if math.isnan(value) or math.isinf(value):
-        return fallback
-    return value
 
 
 # ── Coordinate Transforms (pure math: safe by construction) ──
@@ -36,7 +30,7 @@ def clarke_transform(ia: float, ib: float, ic: float) -> tuple:
         Tuple of (i_alpha, i_beta) [A]
     """
     i_alpha = _guard_numeric(ia, 0.0)
-    i_beta = (_guard_numeric(ia, 0.0) + 2 * _guard_numeric(ib, 0.0)) / math.sqrt(3)
+    i_beta = (_guard_numeric(ib, 0.0) - _guard_numeric(ic, 0.0)) / math.sqrt(3)
     return i_alpha, i_beta
 
 
@@ -53,8 +47,7 @@ def park_transform(i_alpha: float, i_beta: float, theta: float) -> tuple:
     """
     i_alpha = _guard_numeric(i_alpha, 0.0)
     i_beta = _guard_numeric(i_beta, 0.0)
-    cos_t = math.cos(_guard_numeric(theta, 0.0))
-    sin_t = math.sin(_guard_numeric(theta, 0.0))
+    cos_t, sin_t = _cached_cos_sin(_guard_numeric(theta, 0.0))
     id_val = i_alpha * cos_t + i_beta * sin_t
     iq_val = -i_alpha * sin_t + i_beta * cos_t
     return id_val, iq_val
@@ -73,8 +66,7 @@ def inverse_park(vd: float, vq: float, theta: float) -> tuple:
     """
     vd = _guard_numeric(vd, 0.0)
     vq = _guard_numeric(vq, 0.0)
-    cos_t = math.cos(_guard_numeric(theta, 0.0))
-    sin_t = math.sin(_guard_numeric(theta, 0.0))
+    cos_t, sin_t = _cached_cos_sin(_guard_numeric(theta, 0.0))
     v_alpha = vd * cos_t - vq * sin_t
     v_beta = vd * sin_t + vq * cos_t
     return v_alpha, v_beta
@@ -82,7 +74,7 @@ def inverse_park(vd: float, vq: float, theta: float) -> tuple:
 
 # ── SVPWM ────────────────────────────────────────────────────
 
-def svpwm(v_alpha: float, v_beta: float, v_bus: float) -> tuple:
+def svpwm(v_alpha: float, v_beta: float, v_bus: float) -> Tuple[float, float, float]:
     """Space Vector PWM — αβ voltages → 3-phase duty cycles.
 
     SECURITY (CWE-754): NaN/Inf guards, v_bus near-zero guard (CWE-369).
@@ -147,7 +139,7 @@ class PIController:
 
     def __init__(self, *, kp: float, ki: float, ts: float,
                  out_min: float = -float("inf"), out_max: float = float("inf"),
-                 k_aw: float = None):
+                 k_aw: Optional[float] = None):
         """Initialize PI controller.
 
         Args:
@@ -351,209 +343,3 @@ class SpeedController:
         """Reset controller state."""
         self.pi.reset()
 
-
-# ── Legacy compatibility ──────────────────────────────────────
-
-from dataclasses import dataclass as _dataclass
-from typing import Dict as _Dict, Any as _Any, Optional as _Optional
-
-
-@_dataclass
-class FOCParameters:
-    """FOC controller parameters (legacy compatibility)."""
-    # PI controller gains for d-axis
-    Kp_d: float = 10.0
-    Ki_d: float = 100.0
-
-    # PI controller gains for q-axis
-    Kp_q: float = 10.0
-    Ki_q: float = 100.0
-
-    # PI controller gains for speed
-    Kp_speed: float = 1.0
-    Ki_speed: float = 10.0
-
-    # Limits
-    max_voltage: float = 50.0  # Maximum voltage (V)
-    max_current: float = 20.0  # Maximum current (A)
-
-    # Motor parameters (for coordinate transformation)
-    p: int = 4  # Number of pole pairs
-
-
-class FOCControllerLegacy:
-    """Field-Oriented Control (FOC) controller (legacy compatibility wrapper).
-
-    This class wraps FOCController for backward compatibility with
-    the original interface.
-    """
-
-    def __init__(self, params: _Optional[FOCParameters] = None):
-        """Initialize FOC controller.
-
-        Args:
-            params: FOC parameters (uses defaults if None)
-        """
-        self.params = params or FOCParameters()
-
-        # Create wrapped FOC controller
-        self._foc = FOCController(
-            kp_id=self.params.Kp_d, ki_id=self.params.Ki_d,
-            kp_iq=self.params.Kp_q, ki_iq=self.params.Ki_q,
-            ts=50e-6, v_bus=self.params.max_voltage,
-        )
-
-        # PI controller states (for legacy interface)
-        self._integral_d = 0.0
-        self._integral_q = 0.0
-        self._integral_speed = 0.0
-
-        # Reference values
-        self._id_ref = 0.0      # d-axis current reference (A)
-        self._iq_ref = 0.0      # q-axis current reference (A)
-        self._speed_ref = 0.0   # Speed reference (rad/s)
-
-        # Control mode
-        self._mode = "torque"  # "torque" or "speed"
-
-    def set_mode(self, mode: str):
-        """Set control mode.
-
-        Args:
-            mode: Control mode ("torque" or "speed")
-        """
-        if mode not in ["torque", "speed"]:
-            raise ValueError("Mode must be 'torque' or 'speed'")
-        self._mode = mode
-
-    def set_reference(self, **kwargs):
-        """Set reference values.
-
-        Args:
-            **kwargs: Reference values (id_ref, iq_ref, speed_ref)
-        """
-        if 'id_ref' in kwargs:
-            self._id_ref = kwargs['id_ref']
-        if 'iq_ref' in kwargs:
-            self._iq_ref = kwargs['iq_ref']
-        if 'speed_ref' in kwargs:
-            self._speed_ref = kwargs['speed_ref']
-
-    def clarke_transform(self, ia: float, ib: float, ic: float) -> tuple:
-        """Perform Clarke transformation (abc -> alpha-beta).
-
-        Args:
-            ia: Phase a current (A)
-            ib: Phase b current (A)
-            ic: Phase c current (A)
-
-        Returns:
-            Tuple of (ialpha, ibeta) currents (A)
-        """
-        return clarke_transform(ia, ib, ic)
-
-    def park_transform(self, ialpha: float, ibeta: float, theta: float) -> tuple:
-        """Perform Park transformation (alpha-beta -> dq).
-
-        Args:
-            ialpha: Alpha-axis current (A)
-            ibeta: Beta-axis current (A)
-            theta: Electrical angle (rad)
-
-        Returns:
-            Tuple of (id, iq) currents (A)
-        """
-        return park_transform(ialpha, ibeta, theta)
-
-    def inverse_park_transform(self, vd: float, vq: float, theta: float) -> tuple:
-        """Perform inverse Park transformation (dq -> alpha-beta).
-
-        Args:
-            vd: d-axis voltage (V)
-            vq: q-axis voltage (V)
-            theta: Electrical angle (rad)
-
-        Returns:
-            Tuple of (valpha, vbeta) voltages (V)
-        """
-        return inverse_park(vd, vq, theta)
-
-    def update(self, id_meas: float, iq_meas: float, speed_meas: float,
-               theta: float, dt: float) -> tuple:
-        """Update FOC controller.
-
-        Args:
-            id_meas: Measured d-axis current (A)
-            iq_meas: Measured q-axis current (A)
-            speed_meas: Measured mechanical speed (rad/s)
-            theta: Electrical angle (rad)
-            dt: Time step (s)
-
-        Returns:
-            Tuple of (vd, vq) voltages (V)
-        """
-        # Speed controller (if in speed mode)
-        if self._mode == "speed":
-            speed_error = self._speed_ref - speed_meas
-            self._integral_speed += speed_error * dt
-
-            # Anti-windup
-            self._integral_speed = max(-100.0, min(100.0, self._integral_speed))
-
-            # q-axis current reference from speed controller
-            iq_ref = (self.params.Kp_speed * speed_error +
-                     self.params.Ki_speed * self._integral_speed)
-
-            # Limit q-axis current reference
-            iq_ref = max(-self.params.max_current,
-                        min(self.params.max_current, iq_ref))
-        else:
-            iq_ref = self._iq_ref
-
-        # d-axis current controller
-        id_error = self._id_ref - id_meas
-        self._integral_d += id_error * dt
-
-        # Anti-windup
-        self._integral_d = max(-self.params.max_voltage,
-                              min(self.params.max_voltage, self._integral_d))
-
-        vd = self.params.Kp_d * id_error + self.params.Ki_d * self._integral_d
-
-        # q-axis current controller
-        iq_error = iq_ref - iq_meas
-        self._integral_q += iq_error * dt
-
-        # Anti-windup
-        self._integral_q = max(-self.params.max_voltage,
-                              min(self.params.max_voltage, self._integral_q))
-
-        vq = self.params.Kp_q * iq_error + self.params.Ki_q * self._integral_q
-
-        # Limit voltages
-        vd = max(-self.params.max_voltage, min(self.params.max_voltage, vd))
-        vq = max(-self.params.max_voltage, min(self.params.max_voltage, vq))
-
-        return vd, vq
-
-    def reset(self):
-        """Reset controller state."""
-        self._integral_d = 0.0
-        self._integral_q = 0.0
-        self._integral_speed = 0.0
-
-    def get_state(self) -> _Dict[str, _Any]:
-        """Get controller state.
-
-        Returns:
-            Dictionary of controller state
-        """
-        return {
-            'mode': self._mode,
-            'id_ref': self._id_ref,
-            'iq_ref': self._iq_ref,
-            'speed_ref': self._speed_ref,
-            'integral_d': self._integral_d,
-            'integral_q': self._integral_q,
-            'integral_speed': self._integral_speed,
-        }

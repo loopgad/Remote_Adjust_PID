@@ -12,6 +12,14 @@ from typing import Tuple
 from param_id_gui.algorithms.lm import LMConfig, LevenbergMarquardt
 
 
+@pytest.fixture(autouse=True)
+def _isolate_random():
+    """Save and restore numpy global random state to prevent cross-test pollution."""
+    state = np.random.get_state()
+    yield
+    np.random.set_state(state)
+
+
 # ── 测试函数定义 ───────────────────────────────────────────────
 
 def linear_residuals(params: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -104,9 +112,9 @@ class TestLMLinearFitting:
 
     def test_noisy_linear_data(self):
         """带噪声的线性数据"""
-        np.random.seed(42)
+        rng = np.random.default_rng(42)
         x_data = np.linspace(0, 10, 100)
-        y_data = 3 * x_data - 2 + np.random.normal(0, 0.1, 100)
+        y_data = 3 * x_data - 2 + rng.normal(0, 0.1, 100)
 
         lm = LevenbergMarquardt()
         result, info = lm.optimize(
@@ -262,6 +270,11 @@ class TestLMEdgeCases:
 
         assert abs(result[0] - 3.0) < 0.05
 
+    def test_x0_none_raises(self, lm_config):
+        lm = LevenbergMarquardt(config=lm_config)
+        with pytest.raises(ValueError, match="x0"):
+            lm.optimize(residual_func=lambda x: np.array([0.0]), x0=None)
+
 
 class TestLMPerformance:
     """性能测试"""
@@ -280,3 +293,145 @@ class TestLMPerformance:
         elapsed = time.perf_counter() - start
 
         assert elapsed < 1.0, f"Convergence took {elapsed:.2f}s > 1s"
+
+
+class TestLMProgressCallback:
+    """进度回调测试（Bug #1+#2 附带功能）"""
+
+    def test_callback_called(self):
+        """回调被调用"""
+        x_data = np.linspace(0, 10, 20)
+        y_data = 2 * x_data + 1
+
+        lm = LevenbergMarquardt(LMConfig(max_iterations=50))
+        call_log = []
+
+        def callback(iteration, cost, params):
+            call_log.append((iteration, cost))
+            return True
+
+        lm.optimize(
+            residual_func=lambda p: linear_residuals(p, x_data, y_data),
+            x0=np.array([0.0, 0.0]),
+            progress_callback=callback
+        )
+
+        assert len(call_log) > 0
+        assert call_log[0][0] == 1  # First iteration is 1
+
+    def test_callback_returns_false_terminates(self):
+        """回调返回 False 提前终止"""
+        x_data = np.linspace(0, 10, 20)
+        y_data = 2 * x_data + 1
+
+        lm = LevenbergMarquardt(LMConfig(max_iterations=1000))
+        call_count = 0
+
+        def callback(iteration, cost, params):
+            nonlocal call_count
+            call_count += 1
+            return call_count < 2  # Stop after 2 calls
+
+        lm.optimize(
+            residual_func=lambda p: linear_residuals(p, x_data, y_data),
+            x0=np.array([0.0, 0.0]),
+            progress_callback=callback
+        )
+
+        assert call_count == 2
+
+    def test_callback_none_no_error(self):
+        """不传回调无异常"""
+        x_data = np.linspace(0, 10, 20)
+        y_data = 2 * x_data + 1
+
+        lm = LevenbergMarquardt(LMConfig(max_iterations=10))
+        result, info = lm.optimize(
+            residual_func=lambda p: linear_residuals(p, x_data, y_data),
+            x0=np.array([0.0, 0.0]),
+            progress_callback=None
+        )
+        assert info['iterations'] > 0
+
+
+class TestLMConvergenceCorrectness:
+    """收敛检查正确性（C-3）"""
+
+    def test_convergence_only_on_accepted_steps(self):
+        """拒绝步不触发虚假收敛"""
+        # Use a residual function that will cause rejections near the optimum
+        # by having a very flat region
+        def flat_residuals(params):
+            x = params[0]
+            if abs(x) < 0.1:
+                # Very small residual near zero → small gradient → likely rejection
+                return np.array([x * 1e-10])
+            return np.array([x])
+
+        lm = LevenbergMarquardt(LMConfig(
+            max_iterations=50, tolerance=1e-12, lambda_init=1.0
+        ))
+        result, info = lm.optimize(
+            residual_func=flat_residuals,
+            x0=np.array([5.0])
+        )
+
+        # Should converge to near zero
+        assert abs(result[0]) < 1.0, f"Didn't converge: x={result[0]}"
+        # Cost history should be monotonically non-increasing
+        history = info['cost_history']
+        for i in range(1, len(history)):
+            assert history[i] <= history[i-1] + 1e-15, (
+                f"Cost increased at step {i}: {history[i-1]} -> {history[i]}"
+            )
+
+
+class TestLMNumericalStability:
+    """数值稳定性测试（H-1/H-2/H-3）"""
+
+    def test_singular_hessian_no_crash(self):
+        """Hessian 对角线为零时阻尼矩阵不失效"""
+        def zero_diag_residual(params):
+            return np.array([params[1], params[1]])
+
+        lm = LevenbergMarquardt(LMConfig(max_iterations=50))
+        result, info = lm.optimize(
+            residual_func=zero_diag_residual,
+            x0=np.array([1.0, 1.0])
+        )
+        assert np.isfinite(result).all()
+        assert abs(result[1]) < 0.5, f"x[1] didn't converge: {result[1]}"
+
+    def test_adaptive_eps_different_scales(self):
+        """不同量级参数精度合理"""
+        x_data = np.linspace(0, 10, 50)
+        true_a, true_b = 1e-3, 1e6
+        y_data = true_a * x_data + true_b
+
+        def residuals(params):
+            return params[0] * x_data + params[1] - y_data
+
+        lm = LevenbergMarquardt(LMConfig(max_iterations=200, tolerance=1e-12))
+        result, info = lm.optimize(
+            residual_func=residuals,
+            x0=np.array([0.0, 0.0])
+        )
+
+        assert abs(result[0] - true_a) / max(abs(true_a), 1e-15) < 0.01, (
+            f"a: expected {true_a}, got {result[0]}"
+        )
+        assert abs(result[1] - true_b) / max(abs(true_b), 1e-15) < 0.01, (
+            f"b: expected {true_b}, got {result[1]}"
+        )
+
+    def test_zero_predicted_reduction_no_crash(self):
+        """predicted_reduction 接近零时除法不溢出"""
+        def flat_residual(params):
+            return np.array([params[0] * 1e-15])
+
+        lm = LevenbergMarquardt(LMConfig(max_iterations=10))
+        result, info = lm.optimize(
+            residual_func=flat_residual,
+            x0=np.array([1.0])
+        )
+        assert np.isfinite(result).all()

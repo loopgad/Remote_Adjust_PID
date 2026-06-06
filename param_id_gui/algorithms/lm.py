@@ -2,18 +2,7 @@
 
 from typing import Callable, List, Optional, Tuple
 import numpy as np
-from dataclasses import dataclass
-
-
-@dataclass
-class LMConfig:
-    """Levenberg-Marquardt configuration."""
-    max_iterations: int = 1000
-    tolerance: float = 1e-6
-    lambda_init: float = 1e-3
-    lambda_factor: float = 10.0
-    lambda_min: float = 1e-10
-    lambda_max: float = 1e10
+from param_id_gui.core.types import LMConfig
 
 
 class LevenbergMarquardt:
@@ -39,6 +28,7 @@ class LevenbergMarquardt:
         jacobian_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         x0: Optional[np.ndarray] = None,
         bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        progress_callback: Optional[Callable[[int, float, np.ndarray], bool]] = None,
     ) -> Tuple[np.ndarray, dict]:
         """Run Levenberg-Marquardt optimization.
         
@@ -64,6 +54,7 @@ class LevenbergMarquardt:
         residuals = residual_func(x)
         cost = 0.5 * np.sum(residuals**2)
         self._history = [cost]
+        converged = False
         
         for iteration in range(self.config.max_iterations):
             self._iterations = iteration + 1
@@ -80,7 +71,9 @@ class LevenbergMarquardt:
             
             # Levenberg-Marquardt step
             # (H + lambda * diag(H)) * delta = -gradient
-            A = H + lam * np.diag(np.diag(H))
+            diag_H = np.diag(H)
+            diag_H = np.maximum(diag_H, 1e-12)  # Prevent zero damping
+            A = H + lam * np.diag(diag_H)
             
             try:
                 delta = np.linalg.solve(A, -gradient)
@@ -95,17 +88,22 @@ class LevenbergMarquardt:
             # Apply bounds if provided
             if bounds is not None:
                 x_new = np.clip(x_new, bounds[0], bounds[1])
+                # Use actual delta after clipping for predicted reduction
+                actual_delta = x_new - x
+            else:
+                actual_delta = delta
             
             # Compute new residuals and cost
             residuals_new = residual_func(x_new)
             cost_new = 0.5 * np.sum(residuals_new**2)
             
-            # Compute actual vs predicted reduction
-            # predicted = 0.5 * delta.T @ (lam * np.diag(np.diag(H)) @ delta - gradient)
+            # Compute actual vs predicted reduction (use actual_delta)
             actual_reduction = cost - cost_new
-            predicted_reduction = -0.5 * delta.T @ (gradient + lam * np.diag(np.diag(H)) @ delta)
-            
-            if predicted_reduction > 0:
+            predicted_reduction = -0.5 * actual_delta.T @ (gradient + lam * np.diag(diag_H) @ actual_delta)
+
+            if abs(predicted_reduction) < 1e-15:
+                rho = 0
+            elif predicted_reduction > 0:
                 rho = actual_reduction / predicted_reduction
             else:
                 rho = 0
@@ -124,24 +122,31 @@ class LevenbergMarquardt:
                 residuals = residuals_new
                 cost = cost_new
                 self._history.append(cost)
-            
-            # Check convergence
-            if len(self._history) > 1:
-                cost_change = abs(self._history[-2] - self._history[-1])
-                if cost_change < self.config.tolerance:
+
+                # Check convergence only after accepted step
+                if len(self._history) > 1:
+                    cost_change = abs(self._history[-2] - self._history[-1])
+                    if cost_change < self.config.tolerance:
+                        converged = True
+                        break
+
+                # Check gradient norm on accepted x
+                gradient_norm = np.linalg.norm(gradient)
+                if gradient_norm < self.config.tolerance:
+                    converged = True
                     break
-            
-            # Check gradient norm
-            gradient_norm = np.linalg.norm(gradient)
-            if gradient_norm < self.config.tolerance:
-                break
+
+            # Progress callback (return False to stop early)
+            if progress_callback is not None:
+                if not progress_callback(iteration + 1, cost, x):
+                    break
         
         # Compute final statistics
         info = {
             'iterations': self._iterations,
             'final_cost': cost,
             'cost_history': self._history.copy(),
-            'converged': self._iterations < self.config.max_iterations,
+            'converged': converged,
         }
         
         return x, info
@@ -168,10 +173,14 @@ class LevenbergMarquardt:
         J = np.zeros((m, n))
         
         for i in range(n):
+            h = eps * max(1.0, abs(x[i]))
             x_plus = x.copy()
-            x_plus[i] += eps
+            x_plus[i] += h
+            x_minus = x.copy()
+            x_minus[i] -= h
             residuals_plus = residual_func(x_plus)
-            J[:, i] = (residuals_plus - residuals) / eps
+            residuals_minus = residual_func(x_minus)
+            J[:, i] = (residuals_plus - residuals_minus) / (2 * h)
         
         return J
     

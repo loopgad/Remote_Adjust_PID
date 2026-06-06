@@ -120,6 +120,12 @@ def test_port_defaults():
     assert port.description == ""
 
 
+def test_port_invalid_range_raises():
+    """Port with range_min > range_max should raise ValueError."""
+    with pytest.raises(ValueError):
+        Port(name="test", unit="", range_min=10.0, range_max=5.0)
+
+
 # ── ModelMetadata Tests ───────────────────────────────────────
 
 def test_metadata_creation(motor_metadata):

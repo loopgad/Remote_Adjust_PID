@@ -4,7 +4,6 @@ import pytest
 import numpy as np
 from param_id_gui.core.types import (
     SimulationState,
-    ModelType,
     AlgorithmType,
     FidelityLevel,
     PMSMParams,
@@ -13,11 +12,9 @@ from param_id_gui.core.types import (
     FOCParams,
     LMConfig,
     PSOConfig,
-    SimulationStateModel,
-    SimulationResult,
-    OptimizationResult,
     Signal,
 )
+from param_id_gui.core.model_registry import Domain
 
 
 # ── Enum Tests ────────────────────────────────────────────────
@@ -32,27 +29,26 @@ def test_simulation_state_enum():
 
 
 def test_model_type_enum():
-    """Test ModelType enum values."""
-    assert ModelType.MOTOR == "motor"
-    assert ModelType.POWER == "power"
-    assert ModelType.CONTROLLER == "controller"
-    assert ModelType.CUSTOM == "custom"
+    """Test Domain enum values."""
+    assert Domain.MOTOR == "motor"
+    assert Domain.POWER == "power"
+    assert Domain.CONTROLLER == "controller"
+    assert Domain.SENSOR == "sensor"
 
 
 def test_algorithm_type_enum():
     """Test AlgorithmType enum values."""
     assert AlgorithmType.LEVENBERG_MARQUARDT == "lm"
     assert AlgorithmType.PARTICLE_SWARM == "pso"
-    assert AlgorithmType.GENETIC == "ga"
-    assert AlgorithmType.CUSTOM == "custom"
 
 
 def test_fidelity_level_enum():
     """Test FidelityLevel enum values."""
-    assert FidelityLevel.L0_IDEAL == 0
-    assert FidelityLevel.L1_LINEAR == 1
+    assert FidelityLevel.L0_STUB == 0
+    assert FidelityLevel.L1_EMPIRICAL == 1
     assert FidelityLevel.L2_LUMPED == 2
-    assert FidelityLevel.L3_DISTRIBUTED == 3
+    assert FidelityLevel.L3_PHYSICS == 3
+    assert FidelityLevel.L4_HIGH_FIDELITY == 4
 
 
 # ── Parameter Model Tests ─────────────────────────────────────
@@ -81,16 +77,49 @@ def test_pmsm_params_custom_values():
     assert params.Pp == 6
 
 
+from pydantic import ValidationError
+
+
 def test_pmsm_params_validation_negative():
     """Test PMSMParams rejects negative values."""
-    with pytest.raises(Exception):  # Pydantic ValidationError
+    with pytest.raises(ValidationError):
         PMSMParams(Rs=-1.0)
 
 
 def test_pmsm_params_validation_zero():
     """Test PMSMParams rejects zero for required positive fields."""
-    with pytest.raises(Exception):  # Pydantic ValidationError
+    with pytest.raises(ValidationError):
         PMSMParams(Rs=0.0)
+
+
+def test_pmsm_params_ld_equals_lq():
+    """Test PMSMParams allows Ld == Lq (no cross-field conflict)."""
+    params = PMSMParams(Ld=1e-3, Lq=1e-3)
+    assert params.Ld == params.Lq
+
+
+def test_pmsm_params_rejects_non_numeric():
+    """Test PMSMParams rejects non-numeric input."""
+    with pytest.raises(ValidationError):
+        PMSMParams(Rs="not_a_number")
+
+
+def test_pmsm_params_rejects_nan():
+    """Test PMSMParams rejects NaN input."""
+    with pytest.raises(ValidationError):
+        PMSMParams(Rs=float('nan'))
+
+
+def test_pmsm_params_rejects_inf():
+    """Test PMSMParams rejects Inf input."""
+    with pytest.raises(ValidationError):
+        PMSMParams(Rs=float('inf'))
+
+
+def test_pmsm_params_pp_rejects_float():
+    """Test PMSMParams rejects float for Pp (must be int)."""
+    with pytest.raises(ValidationError):
+        PMSMParams(Pp=4.5)
 
 
 def test_buck_converter_params_defaults():
@@ -141,61 +170,25 @@ def test_pso_config_defaults():
     """Test PSOConfig default values."""
     config = PSOConfig()
     assert config.n_particles == 50
-    assert config.max_iterations == 100
-    assert config.w == 0.7
-    assert config.c1 == 1.5
-    assert config.c2 == 1.5
+    assert config.max_iterations == 1000
+    assert config.tolerance == 1e-6
+    assert config.w == 0.7298
+    assert config.c1 == 1.4962
+    assert config.c2 == 1.4962
     assert config.w_decay == 0.99
 
-
-# ── Simulation State Tests ────────────────────────────────────
-
-def test_simulation_state_model_defaults():
-    """Test SimulationStateModel default values."""
-    state = SimulationStateModel()
-    assert state.state == SimulationState.IDLE
-    assert state.time_ns == 0
-    assert state.step_count == 0
-    assert state.error_message is None
-
-
-def test_simulation_result_creation():
-    """Test SimulationResult creation."""
-    result = SimulationResult(
-        success=True,
-        time_vector=[0.0, 0.1, 0.2],
-        data={"voltage": [12.0, 12.0, 12.0]},
-    )
-    assert result.success is True
-    assert len(result.time_vector) == 3
-    assert "voltage" in result.data
-
-
-# ── Optimization Result Tests ─────────────────────────────────
-
-def test_optimization_result_creation():
-    """Test OptimizationResult creation."""
-    result = OptimizationResult(
-        success=True,
-        optimal_params=[1.0, 2.0, 3.0],
-        residual_norm=1e-6,
-        iterations=100,
-    )
-    assert result.success is True
-    assert len(result.optimal_params) == 3
-    assert result.residual_norm == 1e-6
-    assert result.iterations == 100
 
 
 # ── Signal Tests ──────────────────────────────────────────────
 
 def test_signal_creation():
     """Test Signal creation."""
-    signal = Signal(name="voltage", value=12.0, timestamp_ns=1000)
-    assert signal.name == "voltage"
+    from param_id_gui.core.data_bus import Signal
+    signal = Signal(source="test://voltage", signal_type="voltage", value=12.0, timestamp_ns=1000)
+    assert signal.source == "test://voltage"
     assert signal.value == 12.0
     assert signal.timestamp_ns == 1000
-    assert signal.quality == 0xFF
+    assert signal.quality == 1.0
 
 
 # ── Integration Tests ─────────────────────────────────────────
@@ -220,7 +213,7 @@ def test_param_model_from_dict():
 def test_enum_comparison():
     """Test enum comparison with strings."""
     assert SimulationState.IDLE == "idle"
-    assert ModelType.MOTOR == "motor"
+    assert Domain.MOTOR == "motor"
     assert AlgorithmType.LEVENBERG_MARQUARDT == "lm"
 
 
