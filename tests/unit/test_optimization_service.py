@@ -68,8 +68,8 @@ class TestOptimizationServicePSO:
         lower = np.array([-5.0, -5.0])
         upper = np.array([5.0, 5.0])
         result, info = OptimizationService.run_pso(config, _sphere, (lower, upper))
-        assert np.linalg.norm(result) < 1.0
-        assert info["final_cost"] < 1.0
+        assert np.linalg.norm(result) < 0.5, f"PSO norm={np.linalg.norm(result):.4f} should be <0.5"
+        assert info["final_cost"] < 0.25, f"PSO cost={info['final_cost']:.4f} should be <0.25"
 
     def test_pso_with_x0(self):
         config = PSOConfig(n_particles=20, max_iterations=100)
@@ -77,7 +77,7 @@ class TestOptimizationServicePSO:
         upper = np.array([5.0])
         x0 = np.array([1.0])
         result, info = OptimizationService.run_pso(config, _sphere, (lower, upper), x0=x0)
-        assert abs(result[0]) < 1.0
+        assert abs(result[0]) < 0.5, f"PSO x0 result={result[0]:.4f} should be <0.5 from x0=1.0"
 
     def test_pso_with_callback(self):
         iterations = []

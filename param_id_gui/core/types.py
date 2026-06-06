@@ -21,21 +21,29 @@ from .data_bus import Signal  # noqa: F401
 
 class ModelProtocol(Protocol):
     """Protocol for simulation models."""
-    
+
     def step(self, inputs: Dict[str, float], dt_ns: int = ...) -> Dict[str, float]:
         """Execute one simulation step."""
         ...
-    
+
     def reset(self) -> None:
         """Reset model to initial state."""
         ...
-    
+
     def get_state(self) -> Dict[str, float]:
         """Get current model state."""
         ...
-    
+
     def get_default_inputs(self) -> Dict[str, float]:
         """Get default input dictionary for this model."""
+        ...
+
+    def configure(self, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to update model configuration."""
+        ...
+
+    def get_output_ports(self) -> list:
+        """Get list of output variable names for waveform display."""
         ...
 
 

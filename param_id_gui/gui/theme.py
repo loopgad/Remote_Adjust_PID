@@ -6,7 +6,6 @@ for a modern, professional desktop application.
 
 from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
 
 
 # ── Color Palette (Material Design 3 + Apple HIG) ──────────────

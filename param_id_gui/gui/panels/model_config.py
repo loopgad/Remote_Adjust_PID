@@ -212,6 +212,7 @@ class ModelConfigPanel(QWidget):
             presets = self.PRESETS[self._current_model]
             if preset_name in presets:
                 self._load_params_from_model(presets[preset_name])
+                self._apply_params()
     
     def _load_model_params(self, model_name: str):
         """Load parameters for specified model."""
@@ -392,6 +393,7 @@ class ModelConfigPanel(QWidget):
             presets = self.PRESETS[model_name]
             if "Default" in presets:
                 self._load_params_from_model(presets["Default"])
+                self._apply_params()
                 self._status_label.setText("Parameters reset to default")
                 self._set_status_style("statusIdle")
     

@@ -8,7 +8,7 @@ from typing import Optional, TYPE_CHECKING
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout,
     QTabWidget, QStatusBar, QLabel, QToolBar,
-    QFileDialog, QMessageBox, QApplication
+    QFileDialog, QMessageBox
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QCloseEvent
@@ -68,12 +68,18 @@ class MainWindow(QMainWindow):
         self._param_id_panel.identification_finished.connect(self._on_identification_finished)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._controller and self._controller.get_state().value == "running":
+            reply = QMessageBox.question(
+                self, "Simulation Running",
+                "Simulation is still running. Stop and close?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
         self._status_timer.stop()
         if self._controller:
             self._controller.stop_simulation()
         event.accept()
-        self._status_label.setText("Ready — configure model in Model Configuration tab")
-        self._status_label.setObjectName("statusIdle")
 
     # ── Slots ───────────────────────────────────────────────────
 

@@ -672,9 +672,9 @@ class TestPMSMFOCIntegration:
             vc = (dc - 0.5) * v_bus
             motor.step_abc(va, vb, vc, dt=dt)
 
-        # 电流应接近参考值（允许一定误差，开环近似）
-        assert abs(motor.iq - iq_ref) < 2.0, \
-            f"iq={motor.iq:.3f} should be near ref={iq_ref}"
+        # 电流应接近参考值（FOC闭环控制，1A容差）
+        assert abs(motor.iq - iq_ref) < 1.0, \
+            f"iq={motor.iq:.3f} should be within 1.0A of ref={iq_ref}"
         # 无 NaN/Inf
         assert not math.isnan(motor.iq)
         assert not math.isinf(motor.iq)

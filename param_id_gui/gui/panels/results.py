@@ -4,7 +4,7 @@ Provides interface for visualizing simulation results, comparing different
 runs, and exporting data.
 """
 
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 import logging
 import numpy as np
 

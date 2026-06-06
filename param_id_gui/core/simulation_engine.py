@@ -24,9 +24,10 @@ __all__ = ["SimulationEngine"]
 
 class SimulationEngine:
     """Pure Python simulation runner. No Qt dependency.
-    
-    Runs simulation in a background thread using Orchestrator + DataBus + ModelRegistry.
-    Reports progress via callbacks.
+
+    Runs simulation synchronously in the calling thread via Orchestrator.
+    Reports progress via callbacks. Thread management is handled by the caller
+    (e.g., SimulationController wraps this in a QThread).
     """
 
     def __init__(self, orchestrator: Orchestrator, data_bus: DataBus,
@@ -35,8 +36,8 @@ class SimulationEngine:
         self._data_bus = data_bus
         self._model_registry = model_registry
         self._stop_event = threading.Event()
-        self._latest_data: Dict[str, Any] = {}
         self._data_lock = threading.Lock()
+        self._latest_data: Dict[str, Any] = {}
         self._current_model_name: Optional[str] = None
         self._current_params: Optional[Dict[str, Any]] = None
 
@@ -50,17 +51,20 @@ class SimulationEngine:
         on_finished: Optional[Callable[[], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
     ) -> bool:
-        """Start simulation in a background thread.
-        
+        """Run simulation synchronously in the calling thread.
+
+        This method blocks until the simulation completes or is stopped.
+        Thread management is the caller's responsibility.
+
         Args:
             model_name: Model identifier in registry
-            params: Model parameters
+            params: Model parameters to apply before simulation
             duration: Simulation duration in seconds
             step_size: Simulation step size in seconds
-            on_step: Callback with state dict after each step
-            on_finished: Callback when simulation completes
-            on_error: Callback with error message on failure
-            
+            on_step: Callback(state_dict) after each step (throttled to ~20Hz)
+            on_finished: Callback when simulation completes normally
+            on_error: Callback(error_msg) on failure
+
         Returns:
             True if simulation started, False if already running
         """
@@ -83,9 +87,17 @@ class SimulationEngine:
                 on_error(msg)
             return False
 
+        # Apply user parameters to model instance (C4 fix)
+        self._apply_params_to_model(model, params)
+
         default_inputs = model.get_default_inputs() if hasattr(model, 'get_default_inputs') else {}
 
+        # Signal throttling: report at most every 50ms (~20Hz)
+        last_report_time = 0.0
+        report_interval = 0.05
+
         def step_fn(step_ns: int) -> StepResult:
+            nonlocal last_report_time
             if self._stop_event.is_set():
                 return StepResult(solver_id="simulation_engine", converged=False)
             try:
@@ -98,45 +110,69 @@ class SimulationEngine:
                     error_estimate=float('inf'),
                 )
             t = self._orchestrator.get_time()
-            self._data_bus.publish_scalar(
-                f"{model_name}/time", t, "s",
-                timestamp_ns=int(t * 1e9),
-                module_id="simulation_engine"
-            )
-            state = {
-                "time": t,
-                "step_count": self._orchestrator.get_step_count(),
-                "state": self._orchestrator.get_state().value,
-                **model_state,
-            }
-            with self._data_lock:
-                self._latest_data.update(state)
-            if on_step:
-                on_step(state)
+            # Throttled state update and callback
+            if t - last_report_time >= report_interval:
+                last_report_time = t
+                state = {
+                    "time": t,
+                    "step_count": self._orchestrator.get_step_count(),
+                    "state": self._orchestrator.get_state().value,
+                }
+                if isinstance(model_state, dict):
+                    state.update(model_state)
+                with self._data_lock:
+                    self._latest_data.update(state)
+                if on_step:
+                    on_step(state)
             return StepResult(solver_id="simulation_engine")
 
-        def run_fn() -> None:
-            try:
-                self._orchestrator.register_stepper("simulation_engine", step_fn)
-                self._orchestrator.run(step_ns, duration)
-                if on_finished:
-                    on_finished()
-            except Exception as e:
-                logger.exception("Simulation error")
-                if on_error:
-                    on_error(str(e))
-            finally:
-                self._stop_event.set()
+        try:
+            self._orchestrator.register_stepper("simulation_engine", step_fn)
+            self._orchestrator.run(step_ns, duration)
+            if on_finished:
+                on_finished()
+        except Exception as e:
+            logger.exception("Simulation error")
+            if on_error:
+                on_error(str(e))
+        finally:
+            self._stop_event.set()
 
-        self._orchestrator.set_state(SimulationState.RUNNING)
-        self._thread = threading.Thread(target=run_fn, daemon=True)
-        self._thread.start()
         return True
+
+    def _apply_params_to_model(self, model: Any, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to model instance.
+
+        Tries configure() method first, falls back to direct attribute setting.
+        """
+        if not params:
+            return
+        if hasattr(model, 'configure'):
+            try:
+                model.configure(params)
+                return
+            except Exception as e:
+                logger.warning("model.configure() failed: %s, trying direct set", e)
+        # Fallback: set attributes directly
+        for key, value in params.items():
+            if hasattr(model, key):
+                try:
+                    setattr(model, key, value)
+                except Exception:
+                    logger.debug("Could not set model.%s = %s", key, value)
 
     def stop(self) -> None:
         """Signal simulation to stop."""
         self._stop_event.set()
         self._orchestrator.stop()
+
+    def reset(self) -> None:
+        """Reset engine state. Thread-safe."""
+        with self._data_lock:
+            self._latest_data.clear()
+        self._current_model_name = None
+        self._current_params = None
+        self._stop_event.clear()
 
     def get_latest_data(self) -> Dict[str, Any]:
         """Get latest simulation state data."""

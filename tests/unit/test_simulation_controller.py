@@ -105,7 +105,7 @@ class TestSimulationController:
             ctrl.start_simulation("PMSM", {"Rs": 0.5})
 
             orch.reset.assert_called_once()
-            orch.set_state.assert_called_once_with(SimulationState.RUNNING)
+            # State is now set by orchestrator.run() inside the engine, not by controller
             mock_worker_instance.moveToThread.assert_called_once_with(mock_thread_instance)
             mock_thread_instance.start.assert_called_once()
 

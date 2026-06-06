@@ -9,8 +9,7 @@ Security:
 """
 
 import math
-from typing import Dict, Optional, Tuple
-import numpy as np
+from typing import Any, Dict, Optional, Tuple
 from param_id_gui.core.numeric_utils import guard_numeric as _guard_numeric, cached_cos_sin as _cached_cos_sin
 
 _MOTOR_EPS_L = 1e-12   # minimum inductance [H]
@@ -187,6 +186,24 @@ class PMSMdqModel:
         """Get default inputs for PMSM model."""
         return {"vd": 0.0, "vq": 0.0, "tl": 0.0}
 
+    def configure(self, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to update model attributes.
+
+        Args:
+            params: Dict with keys matching __init__ kwargs (Rs, Ld, Lq, flux_pm, J, B, Pp)
+        """
+        for key, value in params.items():
+            if key == "Pp":
+                value = max(1, int(value))
+            elif key in ("Ld", "Lq"):
+                value = max(_guard_numeric(value, 5e-4), _MOTOR_EPS_L)
+            elif key == "J":
+                value = max(_guard_numeric(value, 1e-3), _MOTOR_EPS_J)
+            elif key in ("Rs", "flux_pm", "B"):
+                value = _guard_numeric(value, getattr(self, key, 0.0))
+            if hasattr(self, key):
+                setattr(self, key, value)
+
     def get_state(self) -> Dict[str, float]:
         """Get current model state.
 
@@ -201,4 +218,8 @@ class PMSMdqModel:
             "omega_e": self.omega_e,
             "speed": self.omega_m,
         }
+
+    def get_output_ports(self) -> list:
+        """Get output variable names for waveform display."""
+        return ["ia", "ib", "ic", "va", "vb", "vc", "speed"]
 

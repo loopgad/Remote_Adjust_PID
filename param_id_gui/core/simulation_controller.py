@@ -73,32 +73,38 @@ class SimulationController(QObject):
     
     def start_simulation(self, model_name: str, params: Dict[str, Any],
                         duration: float = 1.0, step_size: float = 1e-4) -> None:
-        """Start simulation in a background QThread."""
+        """Start simulation in a background QThread.
+
+        State management: orchestrator.run() sets RUNNING internally.
+        We emit state_changed from the worker's started signal.
+        """
         if self._orchestrator.get_state() == SimulationState.RUNNING:
             logger.warning("Simulation already running")
             return
-        
+
+        # Clean up any previous worker/thread
+        self._cleanup()
+
         self._engine.update_params(model_name, params)
         self._orchestrator.reset()
-        
+
         self._worker_thread = QThread()
         self._worker = _SimulationWorker(
             self._engine, model_name, params, duration, step_size
         )
         self._worker.moveToThread(self._worker_thread)
-        
+
         self._worker_thread.started.connect(self._worker.run)
+        self._worker.started.connect(lambda: self.state_changed.emit("running"))
         self._worker.finished.connect(self._on_finished)
         self._worker.error_occurred.connect(self._on_error)
         self._worker.step_completed.connect(self._on_step)
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.error_occurred.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup)
-        
-        self._orchestrator.set_state(SimulationState.RUNNING)
-        self.state_changed.emit("running")
+
         self._worker_thread.start()
-        
+
         logger.info("Simulation started: model=%s, duration=%.3f s, step=%.6f s",
                     model_name, duration, step_size)
     
@@ -119,9 +125,7 @@ class SimulationController(QObject):
     def reset_simulation(self) -> None:
         self.stop_simulation()
         self._orchestrator.reset()
-        self._engine._latest_data.clear()
-        self._engine._current_model_name = None
-        self._engine._current_params = None
+        self._engine.reset()
         self.state_changed.emit("idle")
     
     def get_latest_data(self) -> Dict[str, Any]:

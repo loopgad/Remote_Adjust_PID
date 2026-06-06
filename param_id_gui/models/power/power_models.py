@@ -4,7 +4,7 @@ Security:
   - CWE-754: NaN/Inf guards on all model inputs and outputs
 """
 
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 from param_id_gui.core.numeric_utils import guard_numeric as _guard_num
 
 
@@ -43,6 +43,16 @@ class IdealBattery:
     def get_default_inputs(self) -> Dict[str, float]:
         """Get default inputs."""
         return {"i_load": 0.0}
+
+    def get_output_ports(self) -> list:
+        """Get output variable names for waveform display."""
+        return ["voltage"]
+
+    def configure(self, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to update model attributes."""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, _guard_num(value, getattr(self, key, 0.0)))
 
 
 class RintBattery:
@@ -86,6 +96,16 @@ class RintBattery:
     def get_default_inputs(self) -> Dict[str, float]:
         """Get default inputs."""
         return {"i_load": 0.0}
+
+    def get_output_ports(self) -> list:
+        """Get output variable names for waveform display."""
+        return ["voltage"]
+
+    def configure(self, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to update model attributes."""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, _guard_num(value, getattr(self, key, 0.0)))
 
 
 class AverageInverter:
@@ -148,6 +168,16 @@ class AverageInverter:
         """Get default inputs."""
         return {"duty_a": 0.5, "duty_b": 0.5, "duty_c": 0.5, "v_bus": self.v_bus}
 
+    def get_output_ports(self) -> list:
+        """Get output variable names for waveform display."""
+        return ["v_bus", "va", "vb", "vc"]
+
+    def configure(self, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to update model attributes."""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, _guard_num(value, getattr(self, key, 0.0)))
+
 
 # ── DC-DC Converter Models ────────────────────────────────────
 
@@ -174,6 +204,18 @@ class _DCDCConverterBase:
     def get_default_inputs(self) -> Dict[str, float]:
         """Get default inputs for DC-DC converter."""
         return {"duty_cycle": 0.5, "load_current": 0.0}
+
+    def get_output_ports(self) -> list:
+        """Get output variable names for waveform display."""
+        return ["iL", "vC"]
+
+    def configure(self, params: Dict[str, Any]) -> None:
+        """Apply parameter dict to update model attributes."""
+        for key, value in params.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+            elif hasattr(self.params, key):
+                setattr(self.params, key, value)
 
     def _compute_derivatives(self, iL: float, vC: float, d: float,
                              i_load: float, Vin: float, L: float,

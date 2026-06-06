@@ -21,5 +21,3 @@ def cached_cos_sin(theta: float) -> tuple:
 
 
 # Keep old names as aliases for backward compatibility
-_guard_numeric = guard_numeric
-_guard_num = guard_numeric

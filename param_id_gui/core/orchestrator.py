@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 MAX_SIMULATION_STEPS = 10_000_000
 PAUSE_POLL_INTERVAL_S = 0.05
 PROGRESS_REPORT_INTERVAL = 100
-THREAD_JOIN_TIMEOUT_S = 1.0
 
 
 # ── Step Result ───────────────────────────────────────────────
@@ -70,7 +69,6 @@ class OrchestratorConfig:
     dt_ns: int = 50000  # 50μs default step
     enable_energy_audit: bool = True
     energy_audit_period_steps: int = 1000
-    checkpoint_period_steps: int = 10000
     divergence_threshold: float = 0.1  # 10% energy imbalance
     auto_step_halving: bool = True
     max_step_halving: int = 3
@@ -100,7 +98,6 @@ class Orchestrator:
         self._fault_queue: List[Tuple[int, Callable[[], None]]] = []
         self._energy_audits: deque[ConvergenceAudit] = deque(maxlen=10000)
         self._last_error_estimates: deque[float] = deque(maxlen=1000)
-        self._sim_time_s_max: Optional[float] = None
         self._lock = threading.Lock()
 
     # ── model registration ───────────────────────────────────
@@ -126,14 +123,6 @@ class Orchestrator:
         self._initializers[solver_id] = init_fn
 
     # ── run control ──────────────────────────────────────────
-
-    def set_sim_duration(self, duration_s: float) -> None:
-        """Set maximum simulation duration.
-
-        Args:
-            duration_s: Maximum simulation time in seconds
-        """
-        self._sim_time_s_max = duration_s
 
     def add_stop_condition(self, condition: Callable[[], bool]) -> None:
         """Add a stop condition.
@@ -202,7 +191,6 @@ class Orchestrator:
             ValueError: If step_ns or duration_s is invalid
         """
         total_steps = self._validate_sim_params(step_ns, duration_s)
-        self.set_sim_duration(duration_s)
 
         with self._lock:
             self.state = SimulationState.RUNNING

@@ -14,11 +14,11 @@ if TYPE_CHECKING:
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QGroupBox, QComboBox,
-    QDoubleSpinBox, QCheckBox, QProgressBar,
+    QDoubleSpinBox, QProgressBar,
     QSplitter, QTableWidget, QTableWidgetItem, QHeaderView,
     QMessageBox
 )
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, QTimer
 
 try:
     import matplotlib
@@ -116,7 +116,7 @@ class WaveformWidget(QWidget):
         self._canvas.draw_idle()
     
     def clear(self):
-        """Clear all data."""
+        """Clear all data and reset plot lines."""
         self._time_data.clear()
         for data in self._data.values():
             data.clear()
@@ -126,7 +126,46 @@ class WaveformWidget(QWidget):
             self._ax.set_title(self._title)
             self._ax.grid(True)
             self._lines.clear()
+            self._rebuild_lines()
             self._canvas.draw()
+    
+    def clear_series(self):
+        """Remove all series and clear the plot."""
+        self._data.clear()
+        self._time_data.clear()
+        self._lines.clear()
+        if MATPLOTLIB_AVAILABLE:
+            self._ax.clear()
+            self._ax.set_title(self._title)
+            self._ax.grid(True)
+            self._canvas.draw()
+    
+    def set_series(self, names, colors=None):
+        """Set series to display, removing any existing ones.
+        
+        Args:
+            names: List of series names
+            colors: Optional list of colors (cycles if shorter than names)
+        """
+        self.clear_series()
+        if colors is None:
+            default_colors = ["red", "green", "blue", "orange", "purple", "brown", "cyan", "magenta"]
+            colors = default_colors
+        for i, name in enumerate(names):
+            color = colors[i % len(colors)]
+            self.add_series(name, color)
+    
+    def _rebuild_lines(self):
+        """Recreate matplotlib line objects after axes clear."""
+        if not MATPLOTLIB_AVAILABLE:
+            return
+        colors = ["red", "green", "blue", "orange", "purple", "brown", "cyan", "magenta"]
+        for i, name in enumerate(self._data.keys()):
+            color = colors[i % len(colors)]
+            line, = self._ax.plot([], [], label=name, color=color)
+            self._lines[name] = line
+        if self._lines:
+            self._ax.legend()
 
 
 class SimulationPanel(QWidget):
@@ -136,11 +175,25 @@ class SimulationPanel(QWidget):
     and simulation status monitoring.
     """
     
-    # Signals
-    simulation_started = Signal()
-    simulation_paused = Signal()
-    simulation_stopped = Signal()
-    simulation_reset = Signal()
+    # Model output port definitions for waveform configuration
+    _MODEL_OUTPUTS = {
+        "PMSM": {
+            "current": (["ia", "ib", "ic"], ["red", "green", "blue"]),
+            "voltage": (["va", "vb", "vc"], ["red", "green", "blue"]),
+            "speed": (["speed"], ["purple"]),
+        },
+        "Buck Converter": {
+            "inductor": (["iL"], ["red"]),
+            "capacitor": (["vC"], ["blue"]),
+        },
+        "Boost Converter": {
+            "inductor": (["iL"], ["red"]),
+            "capacitor": (["vC"], ["blue"]),
+        },
+        "FOC Controller": {
+            "output": (["vd_ref", "vq_ref", "duty_a"], ["red", "green", "blue"]),
+        },
+    }
     
     def __init__(self, parent: Optional[QWidget] = None):
         """Initialize simulation panel."""
@@ -150,10 +203,12 @@ class SimulationPanel(QWidget):
         self._is_running = False
         self._is_paused = False
         self._simulation_time = 0.0
+        self._current_output_keys = []
         self._update_timer = QTimer(self)
         self._update_timer.timeout.connect(self._update_display)
         
         self._setup_ui()
+        self._configure_waveforms(self._model_combo.currentText())
     
     def set_controller(self, controller: 'SimulationController') -> None:
         """Set the simulation controller.
@@ -176,6 +231,48 @@ class SimulationPanel(QWidget):
         self._controller.state_changed.connect(self._on_state_changed)
         self._controller.step_completed.connect(self._on_step_completed)
         self._controller.error_occurred.connect(self._on_error)
+    
+    def _configure_waveforms(self, model_name: str) -> None:
+        """Reconfigure waveform widgets based on selected model."""
+        # Clear existing waveform widgets
+        for w in self._waveform_widgets:
+            self._waveform_layout.removeWidget(w)
+            w.deleteLater()
+        self._waveform_widgets.clear()
+        
+        # Get output port definitions for this model
+        outputs = self._MODEL_OUTPUTS.get(model_name, {})
+        self._current_output_keys = []
+        
+        for group_name, (keys, colors) in outputs.items():
+            title = group_name.replace("_", " ").title()
+            widget = WaveformWidget(title)
+            widget.set_series(keys, colors)
+            self._waveform_layout.addWidget(widget)
+            self._waveform_widgets.append(widget)
+            self._current_output_keys.extend(keys)
+        
+        if not self._waveform_widgets:
+            placeholder = QLabel("No waveform data for this model")
+            placeholder.setAlignment(Qt.AlignCenter)
+            self._waveform_layout.addWidget(placeholder)
+            self._waveform_widgets.append(placeholder)
+        
+        self._waveform_layout.addStretch()
+        
+        # Update data table rows to match output keys
+        display_keys = ["Time"] + self._current_output_keys
+        self._data_table.setRowCount(len(display_keys))
+        for i, key in enumerate(display_keys):
+            item = self._data_table.item(i, 0)
+            if item is None:
+                self._data_table.setItem(i, 0, QTableWidgetItem(key))
+                self._data_table.setItem(i, 1, QTableWidgetItem("0.0"))
+            else:
+                item.setText(key)
+                val_item = self._data_table.item(i, 1)
+                if val_item:
+                    val_item.setText("0.0")
     
     def _on_state_changed(self, state: str) -> None:
         """Handle state change from controller."""
@@ -311,7 +408,8 @@ class SimulationPanel(QWidget):
         params_layout.addRow("Step Size:", self._step_size_spin)
         
         self._model_combo = QComboBox()
-        self._model_combo.addItems(["PMSM", "Buck Converter", "Boost Converter"])
+        self._model_combo.addItems(["PMSM", "Buck Converter", "Boost Converter", "FOC Controller"])
+        self._model_combo.currentTextChanged.connect(self._configure_waveforms)
         params_layout.addRow("Model:", self._model_combo)
         
         control_layout.addWidget(params_group)
@@ -336,16 +434,12 @@ class SimulationPanel(QWidget):
         data_group = QGroupBox("Current Values")
         data_layout = QVBoxLayout(data_group)
         
-        self._data_table = QTableWidget(4, 2)
+        self._data_table = QTableWidget(1, 2)
         self._data_table.setHorizontalHeaderLabels(["Variable", "Value"])
         self._data_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self._data_table.verticalHeader().setVisible(False)
-        
-        # Initialize with default variables
-        variables = ["Time", "ia", "ib", "ic"]
-        for i, var in enumerate(variables):
-            self._data_table.setItem(i, 0, QTableWidgetItem(var))
-            self._data_table.setItem(i, 1, QTableWidgetItem("0.0"))
+        self._data_table.setItem(0, 0, QTableWidgetItem("Time"))
+        self._data_table.setItem(0, 1, QTableWidgetItem("0.0"))
         
         data_layout.addWidget(self._data_table)
         control_layout.addWidget(data_group)
@@ -354,30 +448,13 @@ class SimulationPanel(QWidget):
         
         splitter.addWidget(control_widget)
         
-        # Right panel - Waveforms
-        waveform_widget = QWidget()
-        waveform_layout = QVBoxLayout(waveform_widget)
+        # Right panel - Waveforms (dynamically populated by _configure_waveforms)
+        self._waveform_container = QWidget()
+        self._waveform_layout = QVBoxLayout(self._waveform_container)
+        self._waveform_layout.setContentsMargins(0, 0, 0, 0)
+        self._waveform_widgets = []
         
-        # Current waveform
-        self._current_waveform = WaveformWidget("Phase Currents")
-        self._current_waveform.add_series("ia", "red")
-        self._current_waveform.add_series("ib", "green")
-        self._current_waveform.add_series("ic", "blue")
-        waveform_layout.addWidget(self._current_waveform)
-        
-        # Voltage waveform
-        self._voltage_waveform = WaveformWidget("Voltages")
-        self._voltage_waveform.add_series("va", "red")
-        self._voltage_waveform.add_series("vb", "green")
-        self._voltage_waveform.add_series("vc", "blue")
-        waveform_layout.addWidget(self._voltage_waveform)
-        
-        # Speed waveform
-        self._speed_waveform = WaveformWidget("Speed")
-        self._speed_waveform.add_series("speed", "purple")
-        waveform_layout.addWidget(self._speed_waveform)
-        
-        splitter.addWidget(waveform_widget)
+        splitter.addWidget(self._waveform_container)
         
         # Set splitter proportions
         splitter.setSizes([300, 700])
@@ -416,12 +493,12 @@ class SimulationPanel(QWidget):
         if self._controller:
             self._controller.reset_simulation()
         
-        # Clear waveforms
-        self._current_waveform.clear()
-        self._voltage_waveform.clear()
-        self._speed_waveform.clear()
+        # Clear all waveform widgets
+        for w in self._waveform_widgets:
+            if isinstance(w, WaveformWidget):
+                w.clear()
         
-        # Reset data table
+        # Reset data table values
         for i in range(self._data_table.rowCount()):
             item = self._data_table.item(i, 1)
             if item is not None:
@@ -452,17 +529,10 @@ class SimulationPanel(QWidget):
         step_count = data.get("step_count", 0)
         self._step_count_label.setText(str(step_count))
         
-        # Update waveforms if we have model data
-        model_name = self._controller.get_current_model_name() or "PMSM"
-        
-        # Extract model-specific data
+        # Extract model-specific data using dynamic output keys
         waveform_data = {}
-        for key in ["ia", "ib", "ic", "va", "vb", "vc", "speed"]:
-            # Try with model prefix first, then without
-            full_key = f"{model_name}/{key}"
-            if full_key in data:
-                waveform_data[key] = data[full_key]
-            elif key in data:
+        for key in self._current_output_keys:
+            if key in data:
                 waveform_data[key] = data[key]
         
         if waveform_data:
@@ -478,44 +548,34 @@ class SimulationPanel(QWidget):
         self._simulation_time = time
         self._time_label.setText(f"{time:.3f} s")
         
-        # Update current waveforms
-        current_data = {}
-        for key in ["ia", "ib", "ic"]:
-            if key in data:
-                current_data[key] = data[key]
-        if current_data:
-            self._current_waveform.update_data(time, current_data)
-        
-        # Update voltage waveforms
-        voltage_data = {}
-        for key in ["va", "vb", "vc"]:
-            if key in data:
-                voltage_data[key] = data[key]
-        if voltage_data:
-            self._voltage_waveform.update_data(time, voltage_data)
-        
-        # Update speed waveform
-        if "speed" in data:
-            self._speed_waveform.update_data(time, {"speed": data["speed"]})
+        # Distribute data to each waveform widget
+        for widget in self._waveform_widgets:
+            if isinstance(widget, WaveformWidget):
+                # Find which keys this widget owns
+                widget_data = {}
+                for key in data:
+                    if key in widget._data:
+                        widget_data[key] = data[key]
+                if widget_data:
+                    widget.update_data(time, widget_data)
         
         # Update data table
         self._update_data_table(time, data)
     
     def _update_data_table(self, time: float, data: Dict[str, float]):
         """Update data table with current values."""
-        # Update time
+        # Update time (row 0)
         time_item = self._data_table.item(0, 1)
         if time_item:
             time_item.setText(f"{time:.6f}")
         
-        # Update other variables
-        row = 1
-        for key in ["ia", "ib", "ic"]:
-            if key in data and row < self._data_table.rowCount():
+        # Update model output variables (rows 1..N)
+        for i, key in enumerate(self._current_output_keys):
+            row = i + 1
+            if row < self._data_table.rowCount() and key in data:
                 value_item = self._data_table.item(row, 1)
                 if value_item:
                     value_item.setText(f"{data[key]:.6f}")
-                row += 1
     
     def set_step_count(self, count: int):
         """Set step count display."""
